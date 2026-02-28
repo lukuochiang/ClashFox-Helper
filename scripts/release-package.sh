@@ -22,15 +22,28 @@ rm -rf "${STAGE_DIR}"/*
 # Build binary first.
 GOCACHE=/tmp/go-build-cache bash scripts/build-helper.sh "${STAGE_DIR}/com.clashfox.helper"
 
-# Resolve changelog path for backward compatibility.
-CHANGELOG_SRC=""
-if [[ -f "docs/CHANGELOG.md" ]]; then
-  CHANGELOG_SRC="docs/CHANGELOG.md"
-elif [[ -f "CHANGELOG.md" ]]; then
-  CHANGELOG_SRC="CHANGELOG.md"
-else
-  echo "missing changelog: docs/CHANGELOG.md or CHANGELOG.md"
-  exit 1
+# Generate changelog from git history (no local docs dependency).
+LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+CHANGELOG_OUT="${STAGE_DIR}/CHANGELOG.md"
+{
+  echo "# Changelog"
+  echo
+  echo "## ${VERSION} - $(date -u +%Y-%m-%d)"
+  echo
+  echo "### Commits"
+  if [[ -n "${LAST_TAG}" ]]; then
+    git log --pretty=format:'- %h %s' "${LAST_TAG}..HEAD" || true
+  else
+    git log --pretty=format:'- %h %s' -n 50 || true
+  fi
+} > "${CHANGELOG_OUT}"
+
+# Avoid empty changelog when history is not available in CI edge cases.
+if ! grep -q "^- " "${CHANGELOG_OUT}"; then
+  {
+    echo
+    echo "- automated release package"
+  } >> "${CHANGELOG_OUT}"
 fi
 
 # Copy runtime assets.
@@ -39,7 +52,6 @@ cp scripts/install-helper.sh "${STAGE_DIR}/"
 cp scripts/uninstall-helper.sh "${STAGE_DIR}/"
 cp README.md "${STAGE_DIR}/"
 cp LICENSE "${STAGE_DIR}/"
-cp "${CHANGELOG_SRC}" "${STAGE_DIR}/CHANGELOG.md"
 
 # Generate checksums.
 (
