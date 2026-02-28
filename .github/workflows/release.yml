@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Show Versions
+        run: |
+          sw_vers
+          go version
+
+      - name: Unit Test
+        run: go test ./cmd/privileged-helper
+
+      - name: Compatibility Smoke
+        run: bash scripts/compat-smoke.sh
+
+      - name: Build Release Package
+        run: bash scripts/release-package.sh
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.tar.gz
+            release/*.tar.gz.sha256
+          generate_release_notes: true
