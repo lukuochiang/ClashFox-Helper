@@ -35,6 +35,15 @@ jobs:
       - name: Build Release Package
         run: bash scripts/release-package.sh
 
+      - name: Verify Release Assets
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          for arch in x86_64 arm64 universal; do
+            test -f "release/clashfox-helper-v${version}-darwin-${arch}.tar.gz"
+            test -f "release/clashfox-helper-v${version}-darwin-${arch}.tar.gz.sha256"
+          done
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:

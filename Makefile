@@ -14,7 +14,7 @@ package:
 
 release: test smoke package
 	@echo "release artifacts:"
-	@find release -maxdepth 2 -type f | sort
+	@find release -maxdepth 3 -type f | sort
 
 clean:
 	rm -rf build release

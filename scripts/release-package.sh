@@ -3,7 +3,7 @@ set -euo pipefail
 
 VERSION_FILE="${VERSION_FILE:-./VERSION}"
 REL_DIR="${REL_DIR:-./release}"
-STAGE_DIR="${REL_DIR}/stage"
+WORK_DIR="${REL_DIR}/work"
 
 if [[ ! -f "${VERSION_FILE}" ]]; then
   echo "missing VERSION file: ${VERSION_FILE}"
@@ -16,79 +16,121 @@ if [[ -z "${VERSION}" ]]; then
   exit 1
 fi
 
-mkdir -p "${REL_DIR}" "${STAGE_DIR}"
-rm -rf "${STAGE_DIR}"/*
-
-# Build binary first.
-GOCACHE=/tmp/go-build-cache bash scripts/build-helper.sh "${STAGE_DIR}/com.clashfox.helper"
-
-# Generate changelog from git history (no local docs dependency).
-LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-CHANGELOG_OUT="${STAGE_DIR}/CHANGELOG.md"
-{
-  echo "# Changelog"
-  echo
-  echo "## ${VERSION} - $(date -u +%Y-%m-%d)"
-  echo
-  echo "### Commits"
-  if [[ -n "${LAST_TAG}" ]]; then
-    git log --pretty=format:'- %h %s' "${LAST_TAG}..HEAD" || true
-  else
-    git log --pretty=format:'- %h %s' -n 50 || true
-  fi
-} > "${CHANGELOG_OUT}"
-
-# Avoid empty changelog when history is not available in CI edge cases.
-if ! grep -q "^- " "${CHANGELOG_OUT}"; then
-  {
-    echo
-    echo "- automated release package"
-  } >> "${CHANGELOG_OUT}"
-fi
-
-# Copy runtime assets.
-cp deploy/com.clashfox.helper.plist "${STAGE_DIR}/"
-cp scripts/install-helper.sh "${STAGE_DIR}/"
-cp scripts/uninstall-helper.sh "${STAGE_DIR}/"
-cp README.md "${STAGE_DIR}/"
-cp LICENSE "${STAGE_DIR}/"
-
-# Generate checksums.
-(
-  cd "${STAGE_DIR}"
-  shasum -a 256 com.clashfox.helper com.clashfox.helper.plist install-helper.sh uninstall-helper.sh README.md LICENSE CHANGELOG.md > checksums.txt
-)
-
-BUILD_META="$("${STAGE_DIR}/com.clashfox.helper" --version)"
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo none)"
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-cat > "${STAGE_DIR}/manifest.json" <<JSON
+
+mkdir -p "${REL_DIR}" "${WORK_DIR}"
+rm -rf "${WORK_DIR}"/*
+
+build_binary() {
+  local arch="$1"
+  local out="$2"
+
+  GOOS=darwin GOARCH="${arch}" CGO_ENABLED=0 \
+  go build \
+    -ldflags "-X main.appVersion=${VERSION} -X main.gitCommit=${COMMIT} -X main.buildTime=${BUILD_TIME}" \
+    -o "${out}" \
+    ./cmd/privileged-helper
+}
+
+# Build per-arch binaries.
+X86_BIN="${WORK_DIR}/com.clashfox.helper.x86_64"
+ARM_BIN="${WORK_DIR}/com.clashfox.helper.arm64"
+UNI_BIN="${WORK_DIR}/com.clashfox.helper.universal"
+
+GOCACHE=/tmp/go-build-cache build_binary "amd64" "${X86_BIN}"
+GOCACHE=/tmp/go-build-cache build_binary "arm64" "${ARM_BIN}"
+
+# Create universal binary.
+lipo -create -output "${UNI_BIN}" "${X86_BIN}" "${ARM_BIN}"
+
+LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+
+gen_changelog() {
+  local out="$1"
+  {
+    echo "# Changelog"
+    echo
+    echo "## ${VERSION} - $(date -u +%Y-%m-%d)"
+    echo
+    echo "### Commits"
+    if [[ -n "${LAST_TAG}" ]]; then
+      git log --pretty=format:'- %h %s' "${LAST_TAG}..HEAD" || true
+    else
+      git log --pretty=format:'- %h %s' -n 50 || true
+    fi
+  } > "${out}"
+
+  if ! grep -q "^- " "${out}"; then
+    {
+      echo
+      echo "- automated release package"
+    } >> "${out}"
+  fi
+}
+
+make_variant() {
+  local variant="$1"
+  local bin_src="$2"
+  local stage_dir tarball manifest_arch build_meta
+
+  stage_dir="${REL_DIR}/stage-${variant}"
+  rm -rf "${stage_dir}"
+  mkdir -p "${stage_dir}"
+
+  cp "${bin_src}" "${stage_dir}/com.clashfox.helper"
+  chmod 755 "${stage_dir}/com.clashfox.helper"
+  cp deploy/com.clashfox.helper.plist "${stage_dir}/"
+  cp scripts/install-helper.sh "${stage_dir}/"
+  cp scripts/uninstall-helper.sh "${stage_dir}/"
+  cp README.md "${stage_dir}/"
+  cp LICENSE "${stage_dir}/"
+  gen_changelog "${stage_dir}/CHANGELOG.md"
+
+  (
+    cd "${stage_dir}"
+    shasum -a 256 com.clashfox.helper com.clashfox.helper.plist install-helper.sh uninstall-helper.sh README.md LICENSE CHANGELOG.md > checksums.txt
+  )
+
+  build_meta="{\"version\":\"${VERSION}\",\"gitCommit\":\"${COMMIT}\",\"buildTime\":\"${BUILD_TIME}\",\"launchedAt\":\"\"}"
+
+  manifest_arch="${variant}"
+  cat > "${stage_dir}/manifest.json" <<JSON
 {
   "name": "clashfox-helper",
   "version": "${VERSION}",
   "platform": "darwin",
-  "arch": "$(uname -m)",
+  "arch": "${manifest_arch}",
   "packagedAt": "${BUILD_TIME}",
-  "build": ${BUILD_META}
+  "build": ${build_meta}
 }
 JSON
 
-TARBALL="${REL_DIR}/clashfox-helper-v${VERSION}-darwin-$(uname -m).tar.gz"
-(
-  cd "${STAGE_DIR}"
-  tar -czf "../$(basename "${TARBALL}")" \
-    com.clashfox.helper \
-    com.clashfox.helper.plist \
-    install-helper.sh \
-    uninstall-helper.sh \
-    checksums.txt \
-    manifest.json \
-    README.md \
-    CHANGELOG.md \
-    LICENSE
-)
+  tarball="${REL_DIR}/clashfox-helper-v${VERSION}-darwin-${variant}.tar.gz"
+  (
+    cd "${stage_dir}"
+    tar -czf "../$(basename "${tarball}")" \
+      com.clashfox.helper \
+      com.clashfox.helper.plist \
+      install-helper.sh \
+      uninstall-helper.sh \
+      checksums.txt \
+      manifest.json \
+      README.md \
+      CHANGELOG.md \
+      LICENSE
+  )
 
-# Top-level checksum for tarball.
-shasum -a 256 "${TARBALL}" > "${TARBALL}.sha256"
+  shasum -a 256 "${tarball}" > "${tarball}.sha256"
+  echo "release package ready: ${tarball}"
+  echo "sha256 file: ${tarball}.sha256"
+}
 
-echo "release package ready: ${TARBALL}"
-echo "sha256 file: ${TARBALL}.sha256"
+make_variant "x86_64" "${X86_BIN}"
+make_variant "arm64" "${ARM_BIN}"
+make_variant "universal" "${UNI_BIN}"
+
+# Keep work dir only when explicitly requested.
+if [[ "${KEEP_WORK:-0}" != "1" ]]; then
+  rm -rf "${WORK_DIR}"
+fi
