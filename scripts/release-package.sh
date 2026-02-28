@@ -22,13 +22,24 @@ rm -rf "${STAGE_DIR}"/*
 # Build binary first.
 GOCACHE=/tmp/go-build-cache bash scripts/build-helper.sh "${STAGE_DIR}/com.clashfox.helper"
 
+# Resolve changelog path for backward compatibility.
+CHANGELOG_SRC=""
+if [[ -f "docs/CHANGELOG.md" ]]; then
+  CHANGELOG_SRC="docs/CHANGELOG.md"
+elif [[ -f "CHANGELOG.md" ]]; then
+  CHANGELOG_SRC="CHANGELOG.md"
+else
+  echo "missing changelog: docs/CHANGELOG.md or CHANGELOG.md"
+  exit 1
+fi
+
 # Copy runtime assets.
 cp deploy/com.clashfox.helper.plist "${STAGE_DIR}/"
 cp scripts/install-helper.sh "${STAGE_DIR}/"
 cp scripts/uninstall-helper.sh "${STAGE_DIR}/"
 cp README.md "${STAGE_DIR}/"
 cp LICENSE "${STAGE_DIR}/"
-cp docs/CHANGELOG.md "${STAGE_DIR}/CHANGELOG.md"
+cp "${CHANGELOG_SRC}" "${STAGE_DIR}/CHANGELOG.md"
 
 # Generate checksums.
 (
