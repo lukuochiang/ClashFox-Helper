@@ -2,10 +2,18 @@
 set -euo pipefail
 
 LABEL="com.clashfox.helper"
-BIN_SRC="${1:-./build/com.clashfox.helper}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEFAULT_BIN_SRC="${SCRIPT_DIR}/com.clashfox.helper"
+if [[ ! -f "${DEFAULT_BIN_SRC}" ]]; then
+  DEFAULT_BIN_SRC="./build/com.clashfox.helper"
+fi
+BIN_SRC="${1:-${DEFAULT_BIN_SRC}}"
 VERSION_IN="${2:-}"
 BIN_DST="/Library/PrivilegedHelperTools/${LABEL}"
-PLIST_SRC="./deploy/${LABEL}.plist"
+PLIST_SRC="${SCRIPT_DIR}/${LABEL}.plist"
+if [[ ! -f "${PLIST_SRC}" ]]; then
+  PLIST_SRC="./deploy/${LABEL}.plist"
+fi
 PLIST_DST="/Library/LaunchDaemons/${LABEL}.plist"
 TOKEN_DIR="/Library/Application Support/ClashFox/helper"
 RELEASE_DIR="${TOKEN_DIR}/releases"
@@ -63,8 +71,10 @@ fi
 
 if [[ -n "${VERSION_IN}" ]]; then
   VERSION="${VERSION_IN}"
+elif [[ -f "${SCRIPT_DIR}/VERSION" ]]; then
+  VERSION="$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION")"
 elif [[ -f "./VERSION" ]]; then
-  VERSION="$(tr -d '[:space:]' < ./VERSION)"
+  VERSION="$(tr -d '[:space:]' < "./VERSION")"
 else
   VERSION="unknown"
 fi
