@@ -1279,11 +1279,15 @@ func (h *helper) coreConfigValidate(w http.ResponseWriter, r *http.Request) {
 	defer h.coreMu.Unlock()
 
 	ci := h.callerFromReq(r)
-	bin, err := selectCoreBinary()
-	if err != nil {
-		h.auditf("core_config_validate", ci, false, err.Error())
-		h.writeErr(w, http.StatusInternalServerError, "CORE_VALIDATE_FAILED", err.Error())
-		return
+	bin := coreManagedBinaryPath
+	if !isExecutableFile(bin) {
+		var err error
+		bin, err = selectCoreBinary()
+		if err != nil {
+			h.auditf("core_config_validate", ci, false, err.Error())
+			h.writeErr(w, http.StatusInternalServerError, "CORE_VALIDATE_FAILED", err.Error())
+			return
+		}
 	}
 	args := append([]string(nil), coreArgsTemplate...)
 	args = append(args, "-t")
@@ -1393,6 +1397,15 @@ func (h *helper) coreSwitch(w http.ResponseWriter, r *http.Request) {
 			h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
 			return
 		}
+	} else {
+		if err := h.validateCoreStartupLocked(coreManagedBinaryPath); err != nil {
+			if backupPath != "" {
+				_ = copyFile(backupPath, coreManagedBinaryPath, 0o755)
+			}
+			h.auditf("core_switch", ci, false, "new binary validation failed, rolled back: "+err.Error())
+			h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
+			return
+		}
 	}
 	h.auditf("core_switch", ci, true, fmt.Sprintf("candidate=%s switched_to=%s", req.Candidate, coreManagedBinaryPath))
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "core switched"})
@@ -1481,6 +1494,18 @@ func (h *helper) stopCoreLocked(pid int) error {
 	return nil
 }
 
+func (h *helper) validateCoreStartupLocked(bin string) error {
+	if err := h.startCoreWithBinaryLocked(bin); err != nil {
+		return err
+	}
+	time.Sleep(400 * time.Millisecond)
+	running, pid, _ := coreRunningFromPIDFile()
+	if !running || pid <= 1 {
+		return errors.New("core failed immediate startup validation")
+	}
+	return h.stopCoreLocked(pid)
+}
+
 func (h *helper) watchCoreExit(cmd *exec.Cmd, logf *os.File, lockf *os.File) {
 	err := cmd.Wait()
 	exitCode := 0
@@ -1542,6 +1567,23 @@ func isAllowedCoreBinary(path string) bool {
 	return false
 }
 
+func isAllowedCoreBinaryPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	for _, p := range allowedCoreBinaries {
+		a, err1 := filepath.EvalSymlinks(path)
+		b, err2 := filepath.EvalSymlinks(p)
+		if err1 == nil && err2 == nil && a == b {
+			return true
+		}
+		if filepath.Clean(path) == filepath.Clean(p) {
+			return true
+		}
+	}
+	return false
+}
+
 func isExecutableFile(path string) bool {
 	st, err := os.Stat(path)
 	if err != nil || st.IsDir() {
@@ -1587,6 +1629,13 @@ func coreRunningFromPIDFile() (bool, int, string) {
 	}
 	if !pidAlive(rec.PID) {
 		return false, rec.PID, rec.Binary
+	}
+	if rec.Binary == "" {
+		actual := processPathBestEffort(rec.PID)
+		if !isAllowedCoreBinaryPath(actual) {
+			return false, rec.PID, ""
+		}
+		return true, rec.PID, actual
 	}
 	if rec.Binary != "" && !pidMatchesBinary(rec.PID, rec.Binary) {
 		return false, rec.PID, rec.Binary
