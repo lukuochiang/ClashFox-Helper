@@ -55,6 +55,17 @@ rollback() {
 }
 trap rollback EXIT
 
+show_diag() {
+  echo "diag: plist lint"
+  plutil -lint "${PLIST_DST}" || true
+  echo "diag: file info"
+  ls -lO@ "${BIN_DST}" "${PLIST_DST}" 2>/dev/null || true
+  echo "diag: xattr"
+  xattr -l "${BIN_DST}" 2>/dev/null || true
+  echo "diag: launchd recent logs"
+  log show --last 3m --style compact --predicate "(process == \"launchd\") AND (eventMessage CONTAINS \"${LABEL}\")" 2>/dev/null | tail -n 80 || true
+}
+
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "run as root: sudo $0 [binary-path]"
   exit 1
@@ -100,9 +111,11 @@ cp -f "${PLIST_SRC}" "${PLIST_TMP}"
 chown root:wheel "${BIN_TMP}" "${PLIST_TMP}"
 chmod 755 "${BIN_TMP}"
 chmod 644 "${PLIST_TMP}"
+# Remove quarantine/xattrs that can cause launchd bootstrap to fail on downloaded artifacts.
+xattr -rc "${BIN_TMP}" "${PLIST_TMP}" 2>/dev/null || true
 
 if launchctl print "system/${LABEL}" >/dev/null 2>&1; then
-  launchctl bootout system "${PLIST_DST}" || true
+  launchctl bootout "system/${LABEL}" || true
 fi
 
 mv -f "${BIN_TMP}" "${BIN_DST}"
@@ -112,7 +125,11 @@ if [[ -f "/var/run/${LABEL}.sock" ]]; then
   rm -f "/var/run/${LABEL}.sock"
 fi
 
-launchctl bootstrap system "${PLIST_DST}"
+if ! launchctl bootstrap system "${PLIST_DST}"; then
+  echo "bootstrap failed for ${LABEL}"
+  show_diag
+  exit 1
+fi
 launchctl enable "system/${LABEL}"
 launchctl kickstart -k "system/${LABEL}"
 

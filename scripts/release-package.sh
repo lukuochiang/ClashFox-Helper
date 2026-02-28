@@ -83,13 +83,14 @@ make_variant() {
   cp deploy/com.clashfox.helper.plist "${stage_dir}/"
   cp scripts/install-helper.sh "${stage_dir}/"
   cp scripts/uninstall-helper.sh "${stage_dir}/"
+  cp VERSION "${stage_dir}/"
   cp README.md "${stage_dir}/"
   cp LICENSE "${stage_dir}/"
   gen_changelog "${stage_dir}/CHANGELOG.md"
 
   (
     cd "${stage_dir}"
-    shasum -a 256 com.clashfox.helper com.clashfox.helper.plist install-helper.sh uninstall-helper.sh README.md LICENSE CHANGELOG.md > checksums.txt
+    shasum -a 256 com.clashfox.helper com.clashfox.helper.plist install-helper.sh uninstall-helper.sh VERSION README.md LICENSE CHANGELOG.md > checksums.txt
   )
 
   build_meta="{\"version\":\"${VERSION}\",\"gitCommit\":\"${COMMIT}\",\"buildTime\":\"${BUILD_TIME}\",\"launchedAt\":\"\"}"
@@ -114,6 +115,7 @@ JSON
       com.clashfox.helper.plist \
       install-helper.sh \
       uninstall-helper.sh \
+      VERSION \
       checksums.txt \
       manifest.json \
       README.md \
