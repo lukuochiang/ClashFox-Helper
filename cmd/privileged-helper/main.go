@@ -120,6 +120,12 @@ type policy struct {
 }
 
 type desiredState struct {
+	Proxy map[string]proxyDesired `json:"proxy,omitempty"`
+	DNS   map[string]dnsDesired   `json:"dns,omitempty"`
+	TUN   *tunDesired             `json:"tun,omitempty"`
+}
+
+type legacyDesiredState struct {
 	Proxy *proxyDesired `json:"proxy,omitempty"`
 	DNS   *dnsDesired   `json:"dns,omitempty"`
 	TUN   *tunDesired   `json:"tun,omitempty"`
@@ -309,7 +315,7 @@ func main() {
 	}
 	defer ln.Close()
 
-	if err := os.Chmod(socketPath, 0o600); err != nil {
+	if err := os.Chmod(socketPath, 0o666); err != nil {
 		logger.Fatalf("chmod socket: %v", err)
 	}
 
@@ -353,7 +359,12 @@ func newFileLogger(path, prefix string) (*log.Logger, func() error, error) {
 
 func ensureToken(path string) (string, error) {
 	if b, err := os.ReadFile(path); err == nil {
-		return strings.TrimSpace(string(b)), nil
+		t := strings.TrimSpace(string(b))
+		if t != "" {
+			return t, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -365,7 +376,12 @@ func ensureToken(path string) (string, error) {
 		return "", err
 	}
 	t := hex.EncodeToString(raw)
-	if err := os.WriteFile(path, []byte(t+"\n"), 0o600); err != nil {
+	tmp := path + ".new." + strconv.Itoa(os.Getpid())
+	if err := os.WriteFile(tmp, []byte(t+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return "", err
 	}
 	return t, nil
@@ -449,11 +465,64 @@ func loadStateBestEffort(path string, logger *log.Logger) desiredState {
 		return desiredState{}
 	}
 	var s desiredState
-	if err := json.Unmarshal(b, &s); err != nil {
-		logger.Printf("ignore bad state file: %v", err)
-		return desiredState{}
+	parseErr := json.Unmarshal(b, &s)
+	if parseErr == nil {
+		return cloneDesiredState(s)
 	}
-	return s
+	var old legacyDesiredState
+	if err := json.Unmarshal(b, &old); err == nil {
+		migrated := desiredState{}
+		if old.Proxy != nil && old.Proxy.Service != "" {
+			migrated.Proxy = map[string]proxyDesired{
+				old.Proxy.Service: {
+					Service: old.Proxy.Service,
+					Host:    old.Proxy.Host,
+					Port:    old.Proxy.Port,
+					Enabled: old.Proxy.Enabled,
+				},
+			}
+		}
+		if old.DNS != nil && old.DNS.Service != "" {
+			migrated.DNS = map[string]dnsDesired{
+				old.DNS.Service: {
+					Service: old.DNS.Service,
+					Servers: append([]string(nil), old.DNS.Servers...),
+				},
+			}
+		}
+		if old.TUN != nil {
+			tun := *old.TUN
+			migrated.TUN = &tun
+		}
+		logger.Printf("migrated legacy state file to multi-service format")
+		return migrated
+	}
+	logger.Printf("ignore bad state file: %v", parseErr)
+	return desiredState{}
+}
+
+func cloneDesiredState(in desiredState) desiredState {
+	out := desiredState{}
+	if len(in.Proxy) > 0 {
+		out.Proxy = make(map[string]proxyDesired, len(in.Proxy))
+		for k, v := range in.Proxy {
+			out.Proxy[k] = v
+		}
+	}
+	if len(in.DNS) > 0 {
+		out.DNS = make(map[string]dnsDesired, len(in.DNS))
+		for k, v := range in.DNS {
+			out.DNS[k] = dnsDesired{
+				Service: v.Service,
+				Servers: append([]string(nil), v.Servers...),
+			}
+		}
+	}
+	if in.TUN != nil {
+		tun := *in.TUN
+		out.TUN = &tun
+	}
+	return out
 }
 
 func loadBaselineBestEffort(path string, logger *log.Logger) baselineState {
@@ -471,7 +540,7 @@ func loadBaselineBestEffort(path string, logger *log.Logger) baselineState {
 
 func (h *helper) saveState() {
 	h.stateMu.RLock()
-	stateCopy := h.state
+	stateCopy := cloneDesiredState(h.state)
 	h.stateMu.RUnlock()
 
 	b, _ := json.MarshalIndent(stateCopy, "", "  ")
@@ -806,7 +875,10 @@ func (h *helper) setGlobalProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.stateMu.Lock()
-		h.state.Proxy = &proxyDesired{Service: req.Service, Host: req.Host, Port: req.Port, Enabled: true}
+		if h.state.Proxy == nil {
+			h.state.Proxy = map[string]proxyDesired{}
+		}
+		h.state.Proxy[req.Service] = proxyDesired{Service: req.Service, Host: req.Host, Port: req.Port, Enabled: true}
 		h.stateMu.Unlock()
 		h.saveState()
 		return nil
@@ -877,7 +949,10 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.stateMu.Lock()
-		h.state.Proxy = &proxyDesired{Service: req.Service, Enabled: false}
+		if h.state.Proxy == nil {
+			h.state.Proxy = map[string]proxyDesired{}
+		}
+		h.state.Proxy[req.Service] = proxyDesired{Service: req.Service, Enabled: false}
 		h.stateMu.Unlock()
 		h.saveState()
 		return nil
@@ -946,7 +1021,10 @@ func (h *helper) setDNS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.stateMu.Lock()
-		h.state.DNS = &dnsDesired{Service: req.Service, Servers: append([]string(nil), req.Servers...)}
+		if h.state.DNS == nil {
+			h.state.DNS = map[string]dnsDesired{}
+		}
+		h.state.DNS[req.Service] = dnsDesired{Service: req.Service, Servers: append([]string(nil), req.Servers...)}
 		h.stateMu.Unlock()
 		h.saveState()
 		return nil
@@ -1720,15 +1798,18 @@ func (h *helper) restoreServiceBaseline(service string, b baselineState) error {
 			return err
 		}
 		h.stateMu.Lock()
+		if h.state.Proxy == nil {
+			h.state.Proxy = map[string]proxyDesired{}
+		}
 		if snap.WebEnabled && snap.SecEnabled && snap.WebHost != "" && snap.WebPort > 0 {
-			h.state.Proxy = &proxyDesired{
+			h.state.Proxy[service] = proxyDesired{
 				Service: service,
 				Host:    snap.WebHost,
 				Port:    snap.WebPort,
 				Enabled: true,
 			}
 		} else {
-			h.state.Proxy = &proxyDesired{Service: service, Enabled: false}
+			h.state.Proxy[service] = proxyDesired{Service: service, Enabled: false}
 		}
 		h.stateMu.Unlock()
 	}
@@ -1738,7 +1819,10 @@ func (h *helper) restoreServiceBaseline(service string, b baselineState) error {
 			return err
 		}
 		h.stateMu.Lock()
-		h.state.DNS = &dnsDesired{Service: service, Servers: append([]string(nil), dns...)}
+		if h.state.DNS == nil {
+			h.state.DNS = map[string]dnsDesired{}
+		}
+		h.state.DNS[service] = dnsDesired{Service: service, Servers: append([]string(nil), dns...)}
 		h.stateMu.Unlock()
 	}
 	if !found {
@@ -1756,10 +1840,13 @@ func (h *helper) restoreAllBaseline(b baselineState) error {
 			return err
 		}
 		h.stateMu.Lock()
+		if h.state.Proxy == nil {
+			h.state.Proxy = map[string]proxyDesired{}
+		}
 		if ps.WebEnabled && ps.SecEnabled && ps.WebHost != "" && ps.WebPort > 0 {
-			h.state.Proxy = &proxyDesired{Service: svc, Host: ps.WebHost, Port: ps.WebPort, Enabled: true}
+			h.state.Proxy[svc] = proxyDesired{Service: svc, Host: ps.WebHost, Port: ps.WebPort, Enabled: true}
 		} else {
-			h.state.Proxy = &proxyDesired{Service: svc, Enabled: false}
+			h.state.Proxy[svc] = proxyDesired{Service: svc, Enabled: false}
 		}
 		h.stateMu.Unlock()
 	}
@@ -1770,7 +1857,10 @@ func (h *helper) restoreAllBaseline(b baselineState) error {
 			return err
 		}
 		h.stateMu.Lock()
-		h.state.DNS = &dnsDesired{Service: svc, Servers: append([]string(nil), d...)}
+		if h.state.DNS == nil {
+			h.state.DNS = map[string]dnsDesired{}
+		}
+		h.state.DNS[svc] = dnsDesired{Service: svc, Servers: append([]string(nil), d...)}
 		h.stateMu.Unlock()
 	}
 	if b.TUN != nil {
@@ -2245,8 +2335,9 @@ func (h *helper) driftf(kind, service, expected, current string) {
 
 func (h *helper) stateSummary() string {
 	h.stateMu.RLock()
-	defer h.stateMu.RUnlock()
-	b, _ := json.Marshal(h.state)
+	stateCopy := cloneDesiredState(h.state)
+	h.stateMu.RUnlock()
+	b, _ := json.Marshal(stateCopy)
 	return string(b)
 }
 
@@ -2260,42 +2351,47 @@ func (h *helper) reconcileLoop() {
 
 func (h *helper) reconcileOnce() {
 	h.stateMu.RLock()
-	s := h.state
+	s := cloneDesiredState(h.state)
 	h.stateMu.RUnlock()
 
-	if s.Proxy != nil {
-		_ = h.withServiceLock(s.Proxy.Service, func() error {
-			enabledWeb, webHost, webPort, err1 := h.getProxyConfig(s.Proxy.Service, false)
-			enabledSec, secHost, secPort, err2 := h.getProxyConfig(s.Proxy.Service, true)
+	for svc, proxy := range s.Proxy {
+		service := svc
+		want := proxy
+		if want.Service != "" {
+			service = want.Service
+		}
+		_ = h.withServiceLock(service, func() error {
+			enabledWeb, webHost, webPort, err1 := h.getProxyConfig(service, false)
+			enabledSec, secHost, secPort, err2 := h.getProxyConfig(service, true)
 			if err1 != nil || err2 != nil {
 				return nil
 			}
-			if s.Proxy.Enabled {
-				if !enabledWeb || !enabledSec || webHost != s.Proxy.Host || secHost != s.Proxy.Host || webPort != s.Proxy.Port || secPort != s.Proxy.Port {
+			if want.Enabled {
+				if !enabledWeb || !enabledSec || webHost != want.Host || secHost != want.Host || webPort != want.Port || secPort != want.Port {
 					h.driftf(
 						"proxy",
-						s.Proxy.Service,
-						fmt.Sprintf("enabled=true host=%s port=%d", s.Proxy.Host, s.Proxy.Port),
+						service,
+						fmt.Sprintf("enabled=true host=%s port=%d", want.Host, want.Port),
 						fmt.Sprintf("web_enabled=%t web_host=%s web_port=%d sec_enabled=%t sec_host=%s sec_port=%d", enabledWeb, webHost, webPort, enabledSec, secHost, secPort),
 					)
-					if err := h.applyProxy(s.Proxy.Service, s.Proxy.Host, s.Proxy.Port, true); err != nil {
+					if err := h.applyProxy(service, want.Host, want.Port, true); err != nil {
 						h.log.Printf("self-heal proxy apply failed: %v", err)
 					} else {
-						h.log.Printf("self-heal proxy reapplied for service=%s", s.Proxy.Service)
+						h.log.Printf("self-heal proxy reapplied for service=%s", service)
 					}
 				}
 			} else {
 				if enabledWeb || enabledSec {
 					h.driftf(
 						"proxy",
-						s.Proxy.Service,
+						service,
 						"enabled=false",
 						fmt.Sprintf("web_enabled=%t sec_enabled=%t", enabledWeb, enabledSec),
 					)
-					if err := h.applyProxy(s.Proxy.Service, "", 0, false); err != nil {
+					if err := h.applyProxy(service, "", 0, false); err != nil {
 						h.log.Printf("self-heal proxy disable failed: %v", err)
 					} else {
-						h.log.Printf("self-heal proxy disabled for service=%s", s.Proxy.Service)
+						h.log.Printf("self-heal proxy disabled for service=%s", service)
 					}
 				}
 			}
@@ -2303,15 +2399,20 @@ func (h *helper) reconcileOnce() {
 		})
 	}
 
-	if s.DNS != nil {
-		_ = h.withServiceLock(s.DNS.Service, func() error {
-			cur, err := h.getDNSServers(s.DNS.Service)
-			if err == nil && !sameStringSlice(cur, s.DNS.Servers) {
-				h.driftf("dns", s.DNS.Service, strings.Join(s.DNS.Servers, ","), strings.Join(cur, ","))
-				if err := h.setDNSServers(s.DNS.Service, s.DNS.Servers); err != nil {
+	for svc, dns := range s.DNS {
+		service := svc
+		want := dns
+		if want.Service != "" {
+			service = want.Service
+		}
+		_ = h.withServiceLock(service, func() error {
+			cur, err := h.getDNSServers(service)
+			if err == nil && !sameStringSlice(cur, want.Servers) {
+				h.driftf("dns", service, strings.Join(want.Servers, ","), strings.Join(cur, ","))
+				if err := h.setDNSServers(service, want.Servers); err != nil {
 					h.log.Printf("self-heal dns failed: %v", err)
 				} else {
-					h.log.Printf("self-heal dns reapplied for service=%s", s.DNS.Service)
+					h.log.Printf("self-heal dns reapplied for service=%s", service)
 				}
 			}
 			return nil
