@@ -159,10 +159,10 @@ type jsonResp struct {
 	OK      bool   `json:"ok"`
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
+	Data    any    `json:"data,omitempty"`
 }
 
-type coreStatusResp struct {
-	OK      bool      `json:"ok"`
+type coreStatusData struct {
 	Running bool      `json:"running"`
 	PID     int       `json:"pid,omitempty"`
 	Binary  string    `json:"binary,omitempty"`
@@ -1207,10 +1207,7 @@ func (h *helper) versionInfo(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 		return
 	}
-	h.writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"version": h.build,
-	})
+	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Data: map[string]any{"version": h.build}})
 }
 
 func (h *helper) coreStatus(w http.ResponseWriter, r *http.Request) {
@@ -1222,13 +1219,15 @@ func (h *helper) coreStatus(w http.ResponseWriter, r *http.Request) {
 	if bin == "" {
 		bin, _ = selectCoreBinary()
 	}
-	h.writeJSON(w, http.StatusOK, coreStatusResp{
-		OK:      true,
-		Running: running,
-		PID:     pid,
-		Binary:  bin,
-		Args:    append([]string(nil), coreArgsTemplate...),
-		Time:    time.Now(),
+	h.writeJSON(w, http.StatusOK, jsonResp{
+		OK: true,
+		Data: coreStatusData{
+			Running: running,
+			PID:     pid,
+			Binary:  bin,
+			Args:    append([]string(nil), coreArgsTemplate...),
+			Time:    time.Now(),
+		},
 	})
 }
 
@@ -1381,10 +1380,12 @@ func (h *helper) coreConfigValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.auditf("core_config_validate", ci, true, "ok")
-	h.writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"message": "config valid",
-		"output":  strings.TrimSpace(string(out)),
+	h.writeJSON(w, http.StatusOK, jsonResp{
+		OK:      true,
+		Message: "config valid",
+		Data: map[string]any{
+			"output": strings.TrimSpace(string(out)),
+		},
 	})
 }
 
