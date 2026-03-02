@@ -16,22 +16,22 @@ section() {
   echo "== $1 =="
 }
 
-run_v2_cmd() {
+run_cmd() {
   local method="$1"
   local path="$2"
   local payload="${3:-}"
   if [ ! -S "$SOCKET_PATH" ]; then
-    echo "skip: v2 socket not found"
+    echo "skip: socket not found"
     return
   fi
   if [ ! -f "$TOKEN_PATH" ]; then
-    echo "skip: v2 token not found"
+    echo "skip: token not found"
     return
   fi
   local token
   token="$(cat "$TOKEN_PATH" 2>/dev/null || true)"
   if [ -z "$token" ]; then
-    echo "skip: v2 token empty"
+    echo "skip: token empty"
     return
   fi
   if [ "$method" = "GET" ]; then
@@ -63,14 +63,14 @@ section "Socket"
 if [ -S "$SOCKET_PATH" ]; then
   ls -l "$SOCKET_PATH"
 else
-  echo "v2 socket missing: $SOCKET_PATH"
+  echo "socket missing: $SOCKET_PATH"
 fi
 
-section "Ping (V2)"
-run_v2_cmd "GET" "/health" || echo "v2 ping failed"
+section "Ping"
+run_cmd "GET" "/health" || echo "ping failed"
 
-section "Core Status (V2)"
-run_v2_cmd "GET" "/v1/core/status" || echo "v2 core status failed"
+section "Core Status"
+run_cmd "GET" "/v1/core/status" || echo "core status failed"
 
 section "Recent Logs"
 if [ -f "$LOG_PATH" ]; then

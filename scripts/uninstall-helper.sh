@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "======================================"
+echo "  ClashFox Helper Uninstall Script"
+echo "======================================"
+
 LABEL="com.clashfox.helper"
 BIN_DST="/Library/PrivilegedHelperTools/${LABEL}"
 PLIST_DST="/Library/LaunchDaemons/${LABEL}.plist"

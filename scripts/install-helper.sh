@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "======================================"
+echo "  ClashFox Helper Install Script"
+echo "======================================"
+
 LABEL="com.clashfox.helper"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_BIN_SRC="${SCRIPT_DIR}/com.clashfox.helper"
