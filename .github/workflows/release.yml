@@ -45,7 +45,6 @@ jobs:
           version="$(tr -d '[:space:]' < VERSION)"
           for arch in x86_64 arm64 universal; do
             test -f "release/clashfox-helper-v${version}-darwin-${arch}.tar.gz"
-            test -f "release/clashfox-helper-v${version}-darwin-${arch}.tar.gz.sha256"
           done
 
       - name: Upload Release Assets
@@ -53,5 +52,4 @@ jobs:
         with:
           files: |
             release/*.tar.gz
-            release/*.tar.gz.sha256
           generate_release_notes: true

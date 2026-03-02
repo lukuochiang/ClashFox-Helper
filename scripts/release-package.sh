@@ -123,9 +123,7 @@ JSON
       LICENSE
   )
 
-  shasum -a 256 "${tarball}" > "${tarball}.sha256"
   echo "release package ready: ${tarball}"
-  echo "sha256 file: ${tarball}.sha256"
 }
 
 make_variant "x86_64" "${X86_BIN}"
