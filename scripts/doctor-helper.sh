@@ -25,6 +25,7 @@ LABEL="com.clashfox.helper"
 INSTALL_BIN="/Library/PrivilegedHelperTools/com.clashfox.helper"
 INSTALL_PLIST="/Library/LaunchDaemons/com.clashfox.helper.plist"
 SOCKET_PATH="/var/run/com.clashfox.helper.sock"
+HELPER_PATH="/Library/Application Support/ClashFox/helper/"
 TOKEN_PATH="/Library/Application Support/ClashFox/helper/token"
 LOG_PATH="/var/log/clashfox-helper.log"
 
@@ -199,7 +200,7 @@ repair_helper() {
   launchctl kickstart -k system/"$LABEL" >/dev/null 2>&1 || true
   sleep 1
   # Ensure GUI process can read helper token; token may be created shortly after launch.
-  chmod 755 "/Library/Application Support/ClashFox/helper" >/dev/null 2>&1 || true
+  chmod 755 "$HELPER_PATH" >/dev/null 2>&1 || true
   local attempt=0
   while [ "$attempt" -lt 25 ]; do
     if [ -f "$TOKEN_PATH" ]; then
