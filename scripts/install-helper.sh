@@ -87,7 +87,11 @@ elif [[ -f "${SCRIPT_DIR}/VERSION" ]]; then
 elif [[ -f "./VERSION" ]]; then
   VERSION="$(tr -d '[:space:]' < "./VERSION")"
 else
-  VERSION="unknown"
+  VERSION_FROM_BIN="$("${BIN_SRC}" --version 2>/dev/null || true)"
+  VERSION="$(printf '%s' "${VERSION_FROM_BIN}" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [[ -z "${VERSION}" ]]; then
+    VERSION="unknown"
+  fi
 fi
 
 mkdir -p "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons" "${TOKEN_DIR}" "${RELEASE_DIR}"
