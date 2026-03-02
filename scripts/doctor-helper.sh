@@ -20,9 +20,8 @@ EXTERNAL_HELPER_DIR="${CLASHFOX_HELPER_DIR:-$SCRIPT_DIR}"
 LABEL="com.clashfox.helper"
 INSTALL_BIN="/Library/PrivilegedHelperTools/com.clashfox.helper"
 INSTALL_PLIST="/Library/LaunchDaemons/com.clashfox.helper.plist"
-V2_SOCKET_PATH="/var/run/com.clashfox.helper.sock"
-V2_TOKEN_PATH="/Library/Application Support/ClashFox/helper/token"
-SOCKET_PATH="$V2_SOCKET_PATH"
+SOCKET_PATH="/var/run/com.clashfox.helper.sock"
+TOKEN_PATH="/Library/Application Support/ClashFox/helper/token"
 LOG_PATH="/var/log/clashfox-helper.log"
 
 SOURCE_BIN=""
@@ -125,13 +124,13 @@ run_checks() {
   else
     CHECK_LAUNCHD_ERROR="$(cat /tmp/clashfox-helper-launchd.err 2>/dev/null || true)"
   fi
-  if [ -S "$V2_SOCKET_PATH" ]; then
+  if [ -S "SOCKET_PATH" ]; then
     CHECK_SOCKET_EXISTS=true
-    SOCKET_PATH="$V2_SOCKET_PATH"
-    if command -v curl >/dev/null 2>&1 && [ -f "$V2_TOKEN_PATH" ]; then
-      V2_TOKEN="$(cat "$V2_TOKEN_PATH" 2>/dev/null || true)"
+    SOCKET_PATH="SOCKET_PATH"
+    if command -v curl >/dev/null 2>&1 && [ -f "$TOKEN_PATH" ]; then
+      V2_TOKEN="$(cat "$TOKEN_PATH" 2>/dev/null || true)"
       if [ -n "$V2_TOKEN" ]; then
-        V2_RESP="$(curl -sS --unix-socket "$V2_SOCKET_PATH" -H "X-Helper-Token: $V2_TOKEN" -X GET "http://localhost/health" --max-time 3 2>/dev/null || true)"
+        V2_RESP="$(curl -sS --unix-socket "SOCKET_PATH" -H "X-Helper-Token: $V2_TOKEN" -X GET "http://localhost/health" --max-time 3 2>/dev/null || true)"
         if echo "$V2_RESP" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
           CHECK_SOCKET_PING_OK=true
         fi
@@ -152,7 +151,7 @@ repair_helper() {
   fi
 
   launchctl bootout system "$INSTALL_PLIST" >/dev/null 2>&1 || launchctl unload "$INSTALL_PLIST" >/dev/null 2>&1 || true
-  rm -f "$INSTALL_PLIST" "$INSTALL_BIN" "$V2_SOCKET_PATH"
+  rm -f "$INSTALL_PLIST" "$INSTALL_BIN" "SOCKET_PATH"
 
   mkdir -p /Library/PrivilegedHelperTools || {
     REPAIR_ERROR="mkdir_failed"
@@ -200,8 +199,8 @@ repair_helper() {
   chmod 755 "/Library/Application Support/ClashFox/helper" >/dev/null 2>&1 || true
   local attempt=0
   while [ "$attempt" -lt 25 ]; do
-    if [ -f "$V2_TOKEN_PATH" ]; then
-      chmod 644 "$V2_TOKEN_PATH" >/dev/null 2>&1 || true
+    if [ -f "$TOKEN_PATH" ]; then
+      chmod 644 "$TOKEN_PATH" >/dev/null 2>&1 || true
       break
     fi
     attempt=$((attempt + 1))
