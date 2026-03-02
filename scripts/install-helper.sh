@@ -4,19 +4,12 @@ set -euo pipefail
 LABEL="com.clashfox.helper"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_BIN_SRC="${SCRIPT_DIR}/com.clashfox.helper"
-if [[ ! -f "${DEFAULT_BIN_SRC}" ]]; then
-  DEFAULT_BIN_SRC="./build/com.clashfox.helper"
-fi
 BIN_SRC="${1:-${DEFAULT_BIN_SRC}}"
 VERSION_IN="${2:-}"
 BIN_DST="/Library/PrivilegedHelperTools/${LABEL}"
 PLIST_SRC="${SCRIPT_DIR}/${LABEL}.plist"
-if [[ ! -f "${PLIST_SRC}" ]]; then
-  PLIST_SRC="./deploy/${LABEL}.plist"
-fi
 PLIST_DST="/Library/LaunchDaemons/${LABEL}.plist"
 TOKEN_DIR="/Library/Application Support/ClashFox/helper"
-RELEASE_DIR="${TOKEN_DIR}/releases"
 VERSION_META="${TOKEN_DIR}/version.json"
 HISTORY_LOG="${TOKEN_DIR}/version-history.log"
 TOKEN_PATH="${TOKEN_DIR}/token"
@@ -72,6 +65,9 @@ verify_launchd_perms() {
   plist_perm="$(stat -f '%Mp%Lp' "${PLIST_DST}")"
   bin_owner="$(stat -f '%Su:%Sg' "${BIN_DST}")"
   plist_owner="$(stat -f '%Su:%Sg' "${PLIST_DST}")"
+  # macOS `stat -f %Mp%Lp` may output with a leading zero (e.g. 0755).
+  bin_perm="${bin_perm#0}"
+  plist_perm="${plist_perm#0}"
 
   if [[ "${bin_owner}" != "root:wheel" || "${plist_owner}" != "root:wheel" ]]; then
     echo "invalid ownership: ${BIN_DST}=${bin_owner}, ${PLIST_DST}=${plist_owner}"
@@ -148,7 +144,7 @@ else
   fi
 fi
 
-mkdir -p "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons" "${TOKEN_DIR}" "${RELEASE_DIR}"
+mkdir -p "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons" "${TOKEN_DIR}"
 chmod 700 "${TOKEN_DIR}"
 chown root:wheel "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
 chmod 755 "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
@@ -156,8 +152,6 @@ chmod 755 "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
 if [[ -f "${BIN_DST}" ]]; then
   BIN_BAK="$(mktemp /tmp/${LABEL}.bin.bak.XXXXXX)"
   cp -f "${BIN_DST}" "${BIN_BAK}"
-  TS="$(date +%Y%m%d-%H%M%S)"
-  cp -f "${BIN_DST}" "${RELEASE_DIR}/${TS}-prev-${LABEL}" || true
 fi
 if [[ -f "${PLIST_DST}" ]]; then
   PLIST_BAK="$(mktemp /tmp/${LABEL}.plist.bak.XXXXXX)"
@@ -216,11 +210,6 @@ cat > "${VERSION_META}" <<EOF
 EOF
 chmod 600 "${VERSION_META}"
 echo "${INSTALLED_AT} version=${VERSION} sha256=${BIN_SHA}" >> "${HISTORY_LOG}"
-
-# Keep only the newest 10 binary backups.
-ls -1t "${RELEASE_DIR}" 2>/dev/null | sed -n '11,$p' | while IFS= read -r old; do
-  rm -f "${RELEASE_DIR}/${old}"
-done
 
 SUCCESS=1
 echo "installed and started: ${LABEL} version=${VERSION}"
