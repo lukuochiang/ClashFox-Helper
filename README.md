@@ -181,11 +181,3 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
   -X POST http://localhost/v1/proxy/disable \
   -d '{}'
 ```
-
-查询 TUN 状态：
-
-```bash
-curl --unix-socket /var/run/com.clashfox.helper.sock \
-  -H "X-Helper-Token: ${TOKEN}" \
-  -X GET http://localhost/v1/tun/status
-```
