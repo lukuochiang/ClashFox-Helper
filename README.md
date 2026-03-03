@@ -38,7 +38,7 @@
 - `POST /v1/core/stop`: 停止 `mihomo` 内核
 - `POST /v1/core/restart`: 重启 `mihomo` 内核
 - `GET /v1/core/status`: 查询 `mihomo` 运行状态
-- `GET /v1/version`: 获取 helper 版本信息（version/commit/buildTime/launchedAt）
+- `GET /version`: 获取 helper 版本信息（version/commit/buildTime/launchedAt）
 - `GET /health`: 健康检查
 
 ## 构建
@@ -109,7 +109,7 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
 ```bash
 curl --unix-socket /var/run/com.clashfox.helper.sock \
   -H "X-Helper-Token: ${TOKEN}" \
-  -X GET http://localhost/v1/version
+  -X GET http://localhost/version
 ```
 
 操作 mihomo 内核：

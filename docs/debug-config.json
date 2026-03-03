@@ -1,0 +1,7 @@
+{
+  "extraAllowedCoreBinaries": [],
+  "extraAllowedClientPathPrefixes": [
+    "/usr/bin/curl"
+  ],
+  "enableConsoleCurl": true
+}

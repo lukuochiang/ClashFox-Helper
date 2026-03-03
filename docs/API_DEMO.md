@@ -16,7 +16,7 @@ TOKEN="$(cat '/Library/Application Support/ClashFox/helper/token')"
 
 ```bash
 curl --unix-socket "$SOCK" -H "X-Helper-Token: ${TOKEN}" -X GET "http://localhost/health"
-curl --unix-socket "$SOCK" -H "X-Helper-Token: ${TOKEN}" -X GET "http://localhost/v1/version"
+curl --unix-socket "$SOCK" -H "X-Helper-Token: ${TOKEN}" -X GET "http://localhost/version"
 ```
 
 ## 2. 系统代理

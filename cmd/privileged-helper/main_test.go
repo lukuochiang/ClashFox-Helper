@@ -298,6 +298,65 @@ func TestDeriveCoreRuntimePaths(t *testing.T) {
 	}
 }
 
+func TestEnsureDebugConfig_DefaultCreate(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "debug-config.json")
+	cfg, err := ensureDebugConfig(p, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("ensureDebugConfig create failed: %v", err)
+	}
+	if cfg.EnableConsoleCurl {
+		t.Fatalf("expected default enableConsoleCurl=false")
+	}
+	if len(cfg.ExtraAllowedCoreBinaries) != 0 || len(cfg.ExtraAllowedClientPathPrefixes) != 0 {
+		t.Fatalf("expected default empty debug config: %+v", cfg)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("expected debug config file created: %v", err)
+	}
+}
+
+func TestEnsureDebugConfig_NormalizeAndApply(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "debug-config.json")
+	raw := `{
+  "extraAllowedCoreBinaries": ["/tmp/mihomo-dev", " relative/path ", "/tmp/mihomo-dev"],
+  "extraAllowedClientPathPrefixes": ["/usr/bin/curl", "bin/client"],
+  "enableConsoleCurl": true
+}`
+	if err := os.WriteFile(p, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write debug config: %v", err)
+	}
+	cfg, err := ensureDebugConfig(p, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("ensureDebugConfig parse failed: %v", err)
+	}
+	if len(cfg.ExtraAllowedCoreBinaries) != 1 || cfg.ExtraAllowedCoreBinaries[0] != "/tmp/mihomo-dev" {
+		t.Fatalf("unexpected extra core binaries: %+v", cfg.ExtraAllowedCoreBinaries)
+	}
+	if len(cfg.ExtraAllowedClientPathPrefixes) != 1 || cfg.ExtraAllowedClientPathPrefixes[0] != "/usr/bin/curl" {
+		t.Fatalf("unexpected extra client prefixes: %+v", cfg.ExtraAllowedClientPathPrefixes)
+	}
+
+	oldBins := append([]string(nil), allowedCoreBinaries...)
+	defer func() {
+		allowedCoreBinaries = oldBins
+	}()
+
+	pol := policy{
+		AllowedUIDs:                []uint32{501},
+		AllowedClientPathPrefixes:  []string{"/Applications/ClashFox.app/"},
+		EnableCallerPathConstraint: true,
+	}
+	allowedCoreBinaries = []string{"/base/mihomo"}
+	applyDebugConfig(&pol, cfg, log.New(io.Discard, "", 0))
+
+	if !containsString(pol.AllowedClientPathPrefixes, "/usr/bin/curl") {
+		t.Fatalf("expected /usr/bin/curl in allowed client prefixes: %+v", pol.AllowedClientPathPrefixes)
+	}
+	if !containsString(allowedCoreBinaries, "/tmp/mihomo-dev") {
+		t.Fatalf("expected extra binary allowed: %+v", allowedCoreBinaries)
+	}
+}
+
 func TestDeriveCoreRuntimePaths_RejectsNonUserHome(t *testing.T) {
 	if _, _, _, _, err := deriveCoreRuntimePaths("/Library/Application Support"); err == nil {
 		t.Fatalf("expected rejection for non /Users home")
@@ -317,6 +376,15 @@ func TestPathWithinBase(t *testing.T) {
 	if pathWithinBase("/Library/Application Support/ClashFox/core", "/Users/alice/Library/Application Support/ClashFox") {
 		t.Fatalf("expected path outside base")
 	}
+}
+
+func containsString(items []string, target string) bool {
+	for _, it := range items {
+		if it == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestValidateCoreRuntimePaths(t *testing.T) {
@@ -453,6 +521,18 @@ func TestResolveCoreConfigPath(t *testing.T) {
 	}
 	if _, err := resolveCoreConfigPath("/tmp/other.yaml"); err == nil {
 		t.Fatalf("expected out-of-base config path to be rejected")
+	}
+}
+
+func TestCoreConfigPathFromArgs(t *testing.T) {
+	if got := coreConfigPathFromArgs([]string{"-d", "/tmp/data", "-f", "/tmp/a.yaml"}); got != "/tmp/a.yaml" {
+		t.Fatalf("unexpected config from args: %q", got)
+	}
+	if got := coreConfigPathFromArgs([]string{"-f", " /tmp/b.yaml "}); got != "/tmp/b.yaml" {
+		t.Fatalf("unexpected trimmed config from args: %q", got)
+	}
+	if got := coreConfigPathFromArgs([]string{"-d", "/tmp/data"}); got != "" {
+		t.Fatalf("expected empty config when -f missing, got %q", got)
 	}
 }
 

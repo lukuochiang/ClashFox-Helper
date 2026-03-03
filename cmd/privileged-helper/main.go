@@ -41,6 +41,7 @@ var (
 	statePath    = filepath.Join(helperStateDir, "state.json")
 	baselinePath = filepath.Join(helperStateDir, "baseline.json")
 	policyPath   = filepath.Join(helperStateDir, "policy.json")
+	debugPath    = filepath.Join(helperStateDir, "debug-config.json")
 	versionPath  = filepath.Join(helperStateDir, "version.json")
 	corePIDPath  = filepath.Join(helperStateDir, "mihomo.pid")
 	coreLockPath = filepath.Join(helperStateDir, "mihomo.lock")
@@ -122,6 +123,12 @@ type policy struct {
 	AllowedUIDs                []uint32 `json:"allowedUIDs"`
 	AllowedClientPathPrefixes  []string `json:"allowedClientPathPrefixes"`
 	EnableCallerPathConstraint bool     `json:"enableCallerPathConstraint"`
+}
+
+type debugConfig struct {
+	ExtraAllowedCoreBinaries       []string `json:"extraAllowedCoreBinaries"`
+	ExtraAllowedClientPathPrefixes []string `json:"extraAllowedClientPathPrefixes"`
+	EnableConsoleCurl              bool     `json:"enableConsoleCurl"`
 }
 
 type desiredState struct {
@@ -311,6 +318,11 @@ func main() {
 	if err != nil {
 		logger.Fatalf("ensure policy: %v", err)
 	}
+	dbg, err := ensureDebugConfig(debugPath, logger)
+	if err != nil {
+		logger.Fatalf("ensure debug config: %v", err)
+	}
+	applyDebugConfig(&pol, dbg, logger)
 
 	loadedState := trimStateForMinimalScope(loadStateBestEffort(statePath, logger))
 	loadedBaseline := trimBaselineForMinimalScope(loadBaselineBestEffort(baselinePath, logger))
@@ -491,6 +503,105 @@ func normalizePolicy(p *policy) {
 		paths = append(paths, pref)
 	}
 	p.AllowedClientPathPrefixes = paths
+}
+
+func ensureDebugConfig(path string, logger *log.Logger) (debugConfig, error) {
+	if b, err := os.ReadFile(path); err == nil {
+		var cfg debugConfig
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			return debugConfig{}, fmt.Errorf("parse debug config: %w", err)
+		}
+		normalizeDebugConfig(&cfg, logger)
+		return cfg, nil
+	} else if !os.IsNotExist(err) {
+		return debugConfig{}, err
+	}
+
+	cfg := debugConfig{
+		ExtraAllowedCoreBinaries:       []string{},
+		ExtraAllowedClientPathPrefixes: []string{},
+		EnableConsoleCurl:              false,
+	}
+	normalizeDebugConfig(&cfg, logger)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return debugConfig{}, err
+	}
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+		return debugConfig{}, err
+	}
+	return cfg, nil
+}
+
+func normalizeDebugConfig(cfg *debugConfig, logger *log.Logger) {
+	cfg.ExtraAllowedCoreBinaries = normalizeAbsPaths(cfg.ExtraAllowedCoreBinaries, "debug core binary", logger)
+	cfg.ExtraAllowedClientPathPrefixes = normalizeAbsPaths(cfg.ExtraAllowedClientPathPrefixes, "debug client path prefix", logger)
+}
+
+func normalizeAbsPaths(in []string, label string, logger *log.Logger) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	for _, p := range in {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			logger.Printf("ignore %s %q: must be absolute path", label, p)
+			continue
+		}
+		p = filepath.Clean(p)
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
+func applyDebugConfig(pol *policy, cfg debugConfig, logger *log.Logger) {
+	if cfg.EnableConsoleCurl {
+		pol.AllowedClientPathPrefixes = append(pol.AllowedClientPathPrefixes, "/usr/bin/curl")
+	}
+	if len(cfg.ExtraAllowedClientPathPrefixes) > 0 {
+		pol.AllowedClientPathPrefixes = append(pol.AllowedClientPathPrefixes, cfg.ExtraAllowedClientPathPrefixes...)
+	}
+	normalizePolicy(pol)
+
+	if len(cfg.ExtraAllowedCoreBinaries) > 0 {
+		allowedCoreBinaries = appendUniqueStrings(allowedCoreBinaries, cfg.ExtraAllowedCoreBinaries...)
+	}
+	logger.Printf("debug config loaded: extraCoreBinaries=%d extraClientPrefixes=%d consoleCurl=%t",
+		len(cfg.ExtraAllowedCoreBinaries), len(cfg.ExtraAllowedClientPathPrefixes), cfg.EnableConsoleCurl)
+}
+
+func appendUniqueStrings(dst []string, extras ...string) []string {
+	seen := make(map[string]struct{}, len(dst))
+	out := make([]string, 0, len(dst)+len(extras))
+	for _, s := range dst {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	for _, s := range extras {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 func consoleUIDBestEffort() uint32 {
@@ -814,7 +925,7 @@ func (h *helper) routes() http.Handler {
 	}))
 	mux.HandleFunc("/v1/proxy/enable", h.withGuards("proxy_enable", h.enableProxy))
 	mux.HandleFunc("/v1/proxy/disable", h.withGuards("proxy_disable", h.disableProxy))
-	mux.HandleFunc("/v1/version", h.withGuards("version", h.versionInfo))
+	mux.HandleFunc("/version", h.withGuards("version", h.versionInfo))
 	mux.HandleFunc("/v1/startup/check", h.withGuards("startup_check", h.startupCheck))
 	mux.HandleFunc("/v1/core/start", h.withGuards("core_start", h.coreStart))
 	mux.HandleFunc("/v1/core/stop", h.withGuards("core_stop", h.coreStop))
@@ -1184,7 +1295,7 @@ func (h *helper) startupCheckData() map[string]any {
 		"/health",
 		"/v1/proxy/enable",
 		"/v1/proxy/disable",
-		"/v1/version",
+		"/version",
 		"/v1/startup/check",
 		"/v1/core/start",
 		"/v1/core/stop",
@@ -1350,14 +1461,25 @@ func (h *helper) coreRestart(w http.ResponseWriter, r *http.Request) {
 	defer h.coreMu.Unlock()
 
 	ci := h.callerFromReq(r)
+	var req struct {
+		ConfigPath string `json:"configPath"`
+		Config     string `json:"config"`
+	}
+	if err := decodeOptionalJSON(r.Body, &req); err != nil {
+		h.auditf("core_restart", ci, false, err.Error())
+		h.writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	configPathReq := strings.TrimSpace(req.ConfigPath)
+	if configPathReq == "" {
+		configPathReq = strings.TrimSpace(req.Config)
+	}
+
 	wasRunning, pid, oldBinary := coreRunningFromPIDFile()
-	restartConfigPath := ""
-	if rec, err := readCorePIDRecord(); err == nil && rec.PID == pid && len(rec.Args) >= 4 {
-		for i := 0; i+1 < len(rec.Args); i++ {
-			if rec.Args[i] == "-f" {
-				restartConfigPath = strings.TrimSpace(rec.Args[i+1])
-				break
-			}
+	restartConfigPath := configPathReq
+	if restartConfigPath == "" {
+		if rec, err := readCorePIDRecord(); err == nil && rec.PID == pid {
+			restartConfigPath = coreConfigPathFromArgs(rec.Args)
 		}
 	}
 	if wasRunning {
@@ -1367,19 +1489,36 @@ func (h *helper) coreRestart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	startErr := error(nil)
-	if wasRunning && oldBinary != "" {
-		_, startErr = h.startCoreWithBinaryLocked(oldBinary, restartConfigPath)
-	} else {
-		_, startErr = h.startCoreLocked("")
+	bin := oldBinary
+	if !wasRunning || bin == "" {
+		var err error
+		bin, err = selectCoreBinary()
+		if err != nil {
+			h.auditf("core_restart", ci, false, "select binary failed: "+err.Error())
+			h.writeErr(w, http.StatusInternalServerError, "CORE_RESTART_FAILED", err.Error())
+			return
+		}
 	}
+	startedConfigPath, startErr := h.startCoreWithBinaryLocked(bin, restartConfigPath)
 	if startErr != nil {
 		h.auditf("core_restart", ci, false, "start failed: "+startErr.Error())
 		h.writeErr(w, http.StatusInternalServerError, "CORE_RESTART_FAILED", startErr.Error())
 		return
 	}
-	h.auditf("core_restart", ci, true, "restarted")
+	h.auditf("core_restart", ci, true, "restarted config="+startedConfigPath)
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "core restarted"})
+}
+
+func coreConfigPathFromArgs(args []string) string {
+	if len(args) < 2 {
+		return ""
+	}
+	for i := 0; i+1 < len(args); i++ {
+		if strings.TrimSpace(args[i]) == "-f" {
+			return strings.TrimSpace(args[i+1])
+		}
+	}
+	return ""
 }
 
 func (h *helper) startCoreLocked(configPathReq string) (string, error) {
