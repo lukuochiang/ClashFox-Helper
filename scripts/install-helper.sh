@@ -105,12 +105,37 @@ clear_quarantine() {
   done
 }
 
+prepare_helper_state_dir() {
+  local base_dir
+  base_dir="$(dirname "${TOKEN_DIR}")"
+
+  mkdir -p "${base_dir}"
+  if [[ -L "${TOKEN_DIR}" ]]; then
+    echo "found legacy symlink at ${TOKEN_DIR}, replacing with real directory"
+    rm -f "${TOKEN_DIR}"
+  fi
+  if [[ -e "${TOKEN_DIR}" && ! -d "${TOKEN_DIR}" ]]; then
+    echo "invalid helper state path (not a directory): ${TOKEN_DIR}"
+    return 1
+  fi
+  mkdir -p "${TOKEN_DIR}"
+  chown root:wheel "${base_dir}" "${TOKEN_DIR}"
+  chmod 755 "${base_dir}"
+  chmod 700 "${TOKEN_DIR}"
+}
+
 ensure_token_readable() {
   chmod 755 "${TOKEN_DIR}" >/dev/null 2>&1 || true
+  local console_uid
+  console_uid="$(stat -f '%u' /dev/console 2>/dev/null || true)"
   local attempt=0
   while [[ "${attempt}" -lt 25 ]]; do
     if [[ -f "${TOKEN_PATH}" ]]; then
-      chmod 644 "${TOKEN_PATH}" >/dev/null 2>&1 || true
+      chmod 600 "${TOKEN_PATH}" >/dev/null 2>&1 || true
+      chmod -N "${TOKEN_PATH}" >/dev/null 2>&1 || true
+      if [[ -n "${console_uid}" && "${console_uid}" != "0" ]]; then
+        chmod +a "user:${console_uid} allow read" "${TOKEN_PATH}" >/dev/null 2>&1 || true
+      fi
       return 0
     fi
     attempt=$((attempt + 1))
@@ -148,8 +173,8 @@ else
   fi
 fi
 
-mkdir -p "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons" "${TOKEN_DIR}"
-chmod 700 "${TOKEN_DIR}"
+mkdir -p "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
+prepare_helper_state_dir
 chown root:wheel "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
 chmod 755 "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
 
@@ -174,7 +199,7 @@ clear_quarantine "${BIN_TMP}" "${PLIST_TMP}"
 xattr -rc "${BIN_TMP}" "${PLIST_TMP}" 2>/dev/null || true
 
 if launchctl print "system/${LABEL}" >/dev/null 2>&1; then
-  launchctl bootout "system/${LABEL}" || true
+  launchctl bootout "system/${LABEL}" >/dev/null 2>&1 || true
 fi
 
 mv -f "${BIN_TMP}" "${BIN_DST}"

@@ -1,12 +1,53 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func newHandlerTestHelper() *helper {
+	l := log.New(io.Discard, "", 0)
+	return &helper{
+		token: "test-token",
+		log:   l,
+		audit: l,
+		policy: policy{
+			AllowedUIDs:                []uint32{501},
+			AllowedClientPathPrefixes:  []string{"/Applications/ClashFox.app/"},
+			EnableCallerPathConstraint: true,
+		},
+		serviceLocks: map[string]*sync.Mutex{},
+		rl:           map[string]*rateBucket{},
+		breaker:      map[string]*breakerState{},
+		rateConf: rateConfig{
+			Window:           10 * time.Second,
+			MaxRequests:      40,
+			BreakerWindow:    60 * time.Second,
+			BreakerThreshold: 8,
+			BreakerTTL:       2 * time.Minute,
+		},
+	}
+}
+
+func withCaller(req *http.Request) *http.Request {
+	ci := callerInfo{
+		UID:  501,
+		PID:  12345,
+		Path: "/Applications/ClashFox.app/Contents/MacOS/ClashFox",
+	}
+	ctx := context.WithValue(req.Context(), callerKey, ci)
+	return req.WithContext(ctx)
+}
 
 func TestParseProxyConfigOutput_MacOS12Style(t *testing.T) {
 	in := []byte("Enabled: No\nServer: \nPort: 0\nAuthenticated Proxy Enabled: 0\n")
@@ -36,46 +77,124 @@ func TestParseProxyConfigOutput_Enabled(t *testing.T) {
 	}
 }
 
-func TestParsePFStatusOutput(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{name: "enabled", in: "Status: Enabled for 0 days", want: true},
-		{name: "disabled", in: "Status: Disabled", want: false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parsePFStatusOutput([]byte(tc.in))
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("want %t got %t", tc.want, got)
-			}
-		})
+func TestParseDefaultRouteInterface(t *testing.T) {
+	out := []byte(`route to: default
+destination: default
+interface: en0
+flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>`)
+	iface := parseDefaultRouteInterface(out)
+	if iface != "en0" {
+		t.Fatalf("expected en0, got %q", iface)
 	}
 }
 
-func TestParsePFStatusOutput_Invalid(t *testing.T) {
-	if _, err := parsePFStatusOutput([]byte("pfctl output changed")); err == nil {
-		t.Fatalf("expected parse error")
+func TestParseNetworkServiceOrder(t *testing.T) {
+	out := []byte(`An asterisk (*) denotes that a network service is disabled.
+(1) Wi-Fi
+(Hardware Port: Wi-Fi, Device: en0)
+(2) USB 10/100/1000 LAN
+(Hardware Port: USB 10/100/1000 LAN, Device: en5)
+`)
+	got := parseNetworkServiceOrder(out)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(got))
+	}
+	if got[0].Service != "Wi-Fi" || got[0].Device != "en0" {
+		t.Fatalf("unexpected first entry: %+v", got[0])
+	}
+	if got[1].Service != "USB 10/100/1000 LAN" || got[1].Device != "en5" {
+		t.Fatalf("unexpected second entry: %+v", got[1])
 	}
 }
 
-func TestValidCoreCandidate(t *testing.T) {
-	ok := []string{"mihomo", "mihomo-v1.19.3", "mihomo_amd64", "mihomo.1"}
-	for _, s := range ok {
-		if !validCoreCandidate(s) {
-			t.Fatalf("expected valid candidate: %s", s)
+func TestAllowedCommand_RouteDefaultOnly(t *testing.T) {
+	bin, err := allowedCommand(cmdRoute, []string{"-n", "get", "default"})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if bin != "/sbin/route" {
+		t.Fatalf("unexpected route bin: %q", bin)
+	}
+	if _, err := allowedCommand(cmdRoute, []string{"get", "default"}); err == nil {
+		t.Fatalf("expected rejection for invalid route args")
+	}
+}
+
+func TestResolveProxyPorts_SplitAndMixed(t *testing.T) {
+	// Split-port style from config: port + socks-port (+ mixed-port should not override explicit values).
+	web, sec, socks, err := resolveProxyPorts(setProxyReq{
+		Port:           7890,
+		SOCKSPortKebab: 7891,
+		MixedPortKebab: 7893,
+	})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if web != 7890 || sec != 7890 || socks != 7891 {
+		t.Fatalf("unexpected split ports web=%d sec=%d socks=%d", web, sec, socks)
+	}
+
+	// Mixed-port only.
+	web, sec, socks, err = resolveProxyPorts(setProxyReq{MixedPort: 7893})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if web != 7893 || sec != 7893 || socks != 7893 {
+		t.Fatalf("unexpected mixed ports web=%d sec=%d socks=%d", web, sec, socks)
+	}
+}
+
+func TestResolveProxyPorts_Conflict(t *testing.T) {
+	_, _, _, err := resolveProxyPorts(setProxyReq{
+		HTTPPort:      7890,
+		HTTPPortKebab: 7891,
+	})
+	if err == nil {
+		t.Fatalf("expected conflict error")
+	}
+}
+
+func TestSecureTokenMatch(t *testing.T) {
+	if !secureTokenMatch("abc123", "abc123") {
+		t.Fatalf("expected token match")
+	}
+	badCases := [][2]string{
+		{"abc123", "abc124"},
+		{"abc123", ""},
+		{"", "abc123"},
+		{"abc123", " abc123x "},
+	}
+	for _, tc := range badCases {
+		if secureTokenMatch(tc[0], tc[1]) {
+			t.Fatalf("expected mismatch: %q vs %q", tc[0], tc[1])
 		}
 	}
-	bad := []string{"", "../mihomo", "a/b", "mihomo;rm", "with space"}
-	for _, s := range bad {
-		if validCoreCandidate(s) {
-			t.Fatalf("expected invalid candidate: %s", s)
-		}
+}
+
+func TestPrepareSocketPath(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	socketFile := filepath.Join(tmpDir, "helper.sock")
+	if err := os.WriteFile(socketFile, []byte("not a socket"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if err := prepareSocketPath(socketFile); err == nil {
+		t.Fatalf("expected error for non-socket path")
+	}
+
+	missing := filepath.Join(tmpDir, "missing.sock")
+	if err := prepareSocketPath(missing); err != nil {
+		t.Fatalf("expected nil for missing socket path, got %v", err)
+	}
+}
+
+func TestPolicyClientUIDs(t *testing.T) {
+	got := policyClientUIDs(policy{AllowedUIDs: []uint32{0, 502, 501, 0, 501}})
+	if len(got) != 2 {
+		t.Fatalf("unexpected uid list length: %v", got)
+	}
+	if got[0] != 501 || got[1] != 502 {
+		t.Fatalf("unexpected uid order/content: %v", got)
 	}
 }
 
@@ -138,4 +257,197 @@ func bytesTrimSpace(b []byte) string {
 		j--
 	}
 	return string(b[i:j])
+}
+
+func TestDecodeJSON_RejectsTrailingData(t *testing.T) {
+	var v struct {
+		Service string `json:"service"`
+	}
+	err := decodeJSON(strings.NewReader(`{"service":"Wi-Fi"}{"x":1}`), &v)
+	if err == nil {
+		t.Fatalf("expected error for trailing json data")
+	}
+}
+
+func TestDecodeJSON_RejectsUnknownField(t *testing.T) {
+	var v struct {
+		Service string `json:"service"`
+	}
+	err := decodeJSON(strings.NewReader(`{"service":"Wi-Fi","extra":1}`), &v)
+	if err == nil {
+		t.Fatalf("expected error for unknown field")
+	}
+}
+
+func TestDeriveCoreRuntimePaths(t *testing.T) {
+	data, bin, conf, logPath, err := deriveCoreRuntimePaths("/Users/alice")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if data != "/Users/alice/Library/Application Support/ClashFox/core" {
+		t.Fatalf("unexpected data path: %q", data)
+	}
+	if bin != "/Users/alice/Library/Application Support/ClashFox/core/mihomo" {
+		t.Fatalf("unexpected binary path: %q", bin)
+	}
+	if conf != "/Users/alice/Library/Application Support/ClashFox/config/config.yaml" {
+		t.Fatalf("unexpected config path: %q", conf)
+	}
+	if logPath != "/Users/alice/Library/Application Support/ClashFox/logs/clashfox.log" {
+		t.Fatalf("unexpected log path: %q", logPath)
+	}
+}
+
+func TestDeriveCoreRuntimePaths_RejectsNonUserHome(t *testing.T) {
+	if _, _, _, _, err := deriveCoreRuntimePaths("/Library/Application Support"); err == nil {
+		t.Fatalf("expected rejection for non /Users home")
+	}
+	if _, _, _, _, err := deriveCoreRuntimePaths("/var/root"); err == nil {
+		t.Fatalf("expected rejection for /var/root")
+	}
+	if _, _, _, _, err := deriveCoreRuntimePaths(""); err == nil {
+		t.Fatalf("expected rejection for empty home")
+	}
+}
+
+func TestPathWithinBase(t *testing.T) {
+	if !pathWithinBase("/Users/alice/Library/Application Support/ClashFox/core", "/Users/alice/Library/Application Support/ClashFox") {
+		t.Fatalf("expected path within base")
+	}
+	if pathWithinBase("/Library/Application Support/ClashFox/core", "/Users/alice/Library/Application Support/ClashFox") {
+		t.Fatalf("expected path outside base")
+	}
+}
+
+func TestValidateCoreRuntimePaths(t *testing.T) {
+	oldHome := coreUserHomeDir
+	oldData := coreDataDir
+	oldBin := coreManagedBinaryPath
+	oldCfg := coreConfigPath
+	oldLog := coreLogPath
+	t.Cleanup(func() {
+		coreUserHomeDir = oldHome
+		coreDataDir = oldData
+		coreManagedBinaryPath = oldBin
+		coreConfigPath = oldCfg
+		coreLogPath = oldLog
+	})
+
+	coreUserHomeDir = "/Users/alice"
+	coreDataDir = "/Users/alice/Library/Application Support/ClashFox/core"
+	coreManagedBinaryPath = "/Users/alice/Library/Application Support/ClashFox/core/mihomo"
+	coreConfigPath = "/Users/alice/Library/Application Support/ClashFox/config/config.yaml"
+	coreLogPath = "/Users/alice/Library/Application Support/ClashFox/logs/clashfox.log"
+	if err := validateCoreRuntimePaths(); err != nil {
+		t.Fatalf("expected valid runtime paths, got %v", err)
+	}
+
+	coreLogPath = "/tmp/clashfox.log"
+	if err := validateCoreRuntimePaths(); err == nil {
+		t.Fatalf("expected invalid runtime path policy")
+	}
+}
+
+func TestWriteFileAtomic(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "atomic.txt")
+	if err := writeFileAtomic(p, []byte("v1\n"), 0o600); err != nil {
+		t.Fatalf("writeFileAtomic v1 failed: %v", err)
+	}
+	if err := writeFileAtomic(p, []byte("v2\n"), 0o600); err != nil {
+		t.Fatalf("writeFileAtomic v2 failed: %v", err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read back failed: %v", err)
+	}
+	if string(b) != "v2\n" {
+		t.Fatalf("unexpected content: %q", string(b))
+	}
+}
+
+func TestValidateCoreStartInputs_RejectsSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "mihomo")
+	cfg := filepath.Join(tmp, "config.yaml")
+	dataDir := filepath.Join(tmp, "data")
+	logDir := filepath.Join(tmp, "logs")
+	logPath := filepath.Join(logDir, "clashfox.log")
+
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write bin: %v", err)
+	}
+	if err := os.WriteFile(cfg, []byte("port: 7890\n"), 0o644); err != nil {
+		t.Fatalf("write cfg: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+
+	oldCfg := coreConfigPath
+	oldData := coreDataDir
+	oldLog := coreLogPath
+	t.Cleanup(func() {
+		coreConfigPath = oldCfg
+		coreDataDir = oldData
+		coreLogPath = oldLog
+	})
+	coreConfigPath = cfg
+	coreDataDir = dataDir
+	coreLogPath = logPath
+
+	if err := validateCoreStartInputs(bin); err != nil {
+		t.Fatalf("expected valid inputs, got %v", err)
+	}
+
+	symCfg := filepath.Join(tmp, "config-link.yaml")
+	if err := os.Symlink(cfg, symCfg); err != nil {
+		t.Fatalf("create symlink cfg: %v", err)
+	}
+	coreConfigPath = symCfg
+	if err := validateCoreStartInputs(bin); err == nil {
+		t.Fatalf("expected symlink config to be rejected")
+	}
+}
+
+func TestStartupCheckEndpoint(t *testing.T) {
+	h := newHandlerTestHelper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/startup/check", nil)
+	req = withCaller(req)
+	req.Header.Set("X-Helper-Token", "test-token")
+	rr := httptest.NewRecorder()
+
+	h.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Paths         map[string]json.RawMessage `json:"paths"`
+			PolicySummary map[string]json.RawMessage `json:"policySummary"`
+			Runtime       map[string]json.RawMessage `json:"runtimeSummary"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("expected ok=true")
+	}
+	if len(resp.Data.Paths) == 0 {
+		t.Fatalf("expected non-empty paths summary")
+	}
+	if _, ok := resp.Data.Paths["coreBinary"]; !ok {
+		t.Fatalf("expected coreBinary path status")
+	}
+	if _, ok := resp.Data.PolicySummary["allowedUIDs"]; !ok {
+		t.Fatalf("expected allowedUIDs in policy summary")
+	}
+	if _, ok := resp.Data.Runtime["routes"]; !ok {
+		t.Fatalf("expected routes in runtime summary")
+	}
 }

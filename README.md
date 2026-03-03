@@ -32,19 +32,12 @@
 
 ## 功能
 
-- `POST /v1/proxy/global`: 开启系统 HTTP/HTTPS 代理
-- `POST /v1/proxy/off`: 关闭系统 HTTP/HTTPS 代理
-- `POST /v1/dns/set`: 设置 DNS
-- `POST /v1/tun/enable`: 开启 TUN 前置能力（IP forwarding / pf）
-- `POST /v1/tun/disable`: 关闭 TUN 前置能力
-- `POST /v1/state/restore`: 按 baseline 恢复（支持全量/单服务）
-- `POST /v1/core/start`: 启动 `mihomo` 内核（固定路径+固定参数模板）
+- `POST /v1/proxy/enable`: 开启系统 HTTP/HTTPS/SOCKS 代理
+- `POST /v1/proxy/disable`: 关闭系统 HTTP/HTTPS/SOCKS 代理
+- `POST /v1/core/start`: 启动 `mihomo` 内核
 - `POST /v1/core/stop`: 停止 `mihomo` 内核
-- `POST /v1/core/restart`: 重启 `mihomo` 内核（失败自动尝试回滚重启）
+- `POST /v1/core/restart`: 重启 `mihomo` 内核
 - `GET /v1/core/status`: 查询 `mihomo` 运行状态
-- `POST /v1/core/reload`: 向运行中的 `mihomo` 发送 `SIGHUP` 触发重载
-- `POST /v1/core/config/validate`: 校验固定配置文件（`mihomo -t`）
-- `POST /v1/core/switch`: 从受控更新目录切换内核二进制（原子替换+失败回滚）
 - `GET /v1/version`: 获取 helper 版本信息（version/commit/buildTime/launchedAt）
 - `GET /health`: 健康检查
 
@@ -76,12 +69,17 @@ sudo bash scripts/install-helper.sh ./build/com.clashfox.helper
 - 旧版本备份: `/Library/Application Support/ClashFox/helper/releases/`
 - mihomo pidfile: `/Library/Application Support/ClashFox/helper/mihomo.pid`
 - mihomo lockfile: `/Library/Application Support/ClashFox/helper/mihomo.lock`
-- mihomo log: `/var/log/clashfox-mihomo.log`
-- mihomo 受控二进制: `/Library/Application Support/ClashFox/core/mihomo`
-- mihomo 更新目录（面板检测下载）: `/Library/Application Support/ClashFox/core/cfox-backup/`
-- mihomo 备份目录（GUI安装备份）: `/Library/Application Support/ClashFox/core/cfox-backup/`
+- mihomo log: `/Users/<name>/Library/Application Support/ClashFox/logs/clashfox.log`
+- mihomo 受控二进制: `/Users/<name>/Library/Application Support/ClashFox/core/mihomo`
+- mihomo 配置文件: `/Users/<name>/Library/Application Support/ClashFox/config/config.yaml`
 - 运行日志: `/var/log/clashfox-helper.log`
 - 审计日志: `/var/log/clashfox-helper-audit.log`
+
+说明：helper 会优先按当前登录用户（`/dev/console`）解析 core 路径到：
+- `/Users/<name>/Library/Application Support/ClashFox/core/mihomo`
+- `/Users/<name>/Library/Application Support/ClashFox/config/config.yaml`
+- `/Users/<name>/Library/Application Support/ClashFox/logs/clashfox.log`
+涉及 mihomo 的安装和更新由 GUI 自己管理，helper 仅负责启停重启与状态查询。
 
 ## 卸载
 
@@ -89,7 +87,7 @@ sudo bash scripts/install-helper.sh ./build/com.clashfox.helper
 sudo bash scripts/uninstall-helper.sh
 ```
 
-说明：卸载脚本会在删除服务前尝试调用 `/v1/state/restore`，并把旧二进制/plist 备份到 `uninstall-backup-*` 目录。
+说明：卸载脚本会停止服务并把旧二进制/plist 备份到 `uninstall-backup-*` 目录。
 
 ## 调用示例
 
@@ -99,41 +97,12 @@ TOKEN="$(cat '/Library/Application Support/ClashFox/helper/token')"
 curl --unix-socket /var/run/com.clashfox.helper.sock \
   -H "X-Helper-Token: ${TOKEN}" \
   -H "Content-Type: application/json" \
-  -X POST http://localhost/v1/proxy/global \
+  -X POST http://localhost/v1/proxy/enable \
   -d '{"service":"Wi-Fi","host":"127.0.0.1","port":7890}'
 ```
 
-恢复基线状态（全量）：
-
-```bash
-curl --unix-socket /var/run/com.clashfox.helper.sock \
-  -H "X-Helper-Token: ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -X POST http://localhost/v1/state/restore
-```
-
-恢复基线状态（单服务）：
-
-```bash
-curl --unix-socket /var/run/com.clashfox.helper.sock \
-  -H "X-Helper-Token: ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -X POST http://localhost/v1/state/restore \
-  -d '{"service":"Wi-Fi"}'
-```
-
-兼容性冒烟测试（含 macOS 12 解析样例）：
-
-```bash
-bash scripts/compat-smoke.sh
-```
-
-常见错误码：
-
-- `RATE_LIMITED`: 调用过于频繁
-- `CIRCUIT_OPEN`: 调用方在短时间内失败过多，被临时封禁
-- `TXN_APPLY_FAILED`: 事务执行失败，已尝试回滚
-- `NOOP`: 当前状态已满足目标，未重复执行
+说明：`service` 字段可省略。未提供时，helper 会自动按默认路由接口解析当前主网络服务（例如 Wi-Fi/Ethernet）。  
+分端口可用：`port/httpPort`（HTTP）、`httpsPort`（HTTPS）、`socksPort`（SOCKS），并兼容 `socks-port`、`mixed-port` 这类连字符字段。若仅提供 `mixed-port`，则三类代理都使用该端口。
 
 查询版本：
 
@@ -156,18 +125,14 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
 
 curl --unix-socket /var/run/com.clashfox.helper.sock \
   -H "X-Helper-Token: ${TOKEN}" \
-  -X POST http://localhost/v1/core/reload
+  -X POST http://localhost/v1/core/restart
 
 curl --unix-socket /var/run/com.clashfox.helper.sock \
   -H "X-Helper-Token: ${TOKEN}" \
-  -X POST http://localhost/v1/core/config/validate
-
-curl --unix-socket /var/run/com.clashfox.helper.sock \
-  -H "X-Helper-Token: ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -X POST http://localhost/v1/core/switch \
-  -d '{"candidate":"mihomo-v1.19.3"}'
+  -X POST http://localhost/v1/core/stop
 ```
+
+完整调用示例（精简版）：[API_DEMO.md](/Users/workstation/os-code/ClashFox-Helper/docs/API_DEMO.md)
 
 约束说明（已内置）：
 
@@ -176,8 +141,11 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
 - `pidfile + lockfile` 防止重复实例
 - `pidfile` 为结构化记录（pid+binary+startedAt），并校验 PID 对应二进制路径，降低 PID 复用误操作风险
 - 退出码写入审计日志（`act=core_exit`）
-- `switch` 仅允许 `cfox-backup/` 目录下的文件名（禁止路径穿越）
-- `switch` 需要 SHA256 完整性校验（请求体 `sha256` 或同名 `.sha256` 文件）
+- 鉴权 token 使用常量时间比较，降低时序侧信道风险
+- 默认策略仅放行 ClashFox 客户端路径（不再默认放行 `/usr/bin/curl`）
+- token 与 unix socket 默认采用 root + ACL（按 `allowedUIDs` 下发最小权限）
+- 启动前仅清理已有 Unix Socket；若路径存在但不是 socket 文件则拒绝启动（防误删/路径投毒）
+- 请求调用方需可解析 peer pid（`SO_PEERPID`），不可解析则拒绝
 
 ## 生产建议
 
@@ -185,3 +153,33 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
 2. 若 GUI 和 helper 分离，建议改为 NSXPC 并在 helper 侧加 `audit token` 校验调用方签名。
 3. 按实际 App 安装位置维护 `policy.json` 中的 `allowedClientPathPrefixes`，避免误拦截。
 4. 版本兼容测试建议包含 macOS 12/13/14/15（尤其 `networksetup` 输出和 `pfctl` 状态解析差异）。
+
+## 常用操作
+
+开启系统代理（`service` 可省略，自动解析主网络服务）：
+
+```bash
+curl --unix-socket /var/run/com.clashfox.helper.sock \
+  -H "X-Helper-Token: ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -X POST http://localhost/v1/proxy/enable \
+  -d '{"host":"127.0.0.1","port":7890}'
+```
+
+关闭系统代理：
+
+```bash
+curl --unix-socket /var/run/com.clashfox.helper.sock \
+  -H "X-Helper-Token: ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -X POST http://localhost/v1/proxy/disable \
+  -d '{}'
+```
+
+查询 TUN 状态：
+
+```bash
+curl --unix-socket /var/run/com.clashfox.helper.sock \
+  -H "X-Helper-Token: ${TOKEN}" \
+  -X GET http://localhost/v1/tun/status
+```

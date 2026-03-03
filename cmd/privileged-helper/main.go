@@ -1,10 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -28,33 +28,37 @@ import (
 )
 
 const (
-	socketPath            = "/var/run/com.clashfox.helper.sock"
-	tokenPath             = "/Library/Application Support/ClashFox/helper/token"
-	statePath             = "/Library/Application Support/ClashFox/helper/state.json"
-	baselinePath          = "/Library/Application Support/ClashFox/helper/baseline.json"
-	policyPath            = "/Library/Application Support/ClashFox/helper/policy.json"
-	versionPath           = "/Library/Application Support/ClashFox/helper/version.json"
-	corePIDPath           = "/Library/Application Support/ClashFox/helper/mihomo.pid"
-	coreLockPath          = "/Library/Application Support/ClashFox/helper/mihomo.lock"
-	coreLogPath           = "/var/log/clashfox-mihomo.log"
-	coreManagedBinaryPath = "/Library/Application Support/ClashFox/core/mihomo"
-	coreUpdateDir         = "/Library/Application Support/ClashFox/core/cfox-backup"
-	coreBackupDir         = "/Library/Application Support/ClashFox/core/cfox-backup"
-	coreConfigPath        = "/Library/Application Support/ClashFox/core/config.yaml"
-	coreDataDir           = "/Library/Application Support/ClashFox/core"
-	logPath               = "/var/log/clashfox-helper.log"
-	auditPath             = "/var/log/clashfox-helper-audit.log"
-
 	solLocal      = 0x0
 	localPeerCred = 0x1
 	localPeerPID  = 0x2
 )
 
 var (
+	clashfoxSystemBase = "/Library/Application Support/ClashFox"
+	helperStateDir     = filepath.Join(clashfoxSystemBase, "helper")
+
+	tokenPath    = filepath.Join(helperStateDir, "token")
+	statePath    = filepath.Join(helperStateDir, "state.json")
+	baselinePath = filepath.Join(helperStateDir, "baseline.json")
+	policyPath   = filepath.Join(helperStateDir, "policy.json")
+	versionPath  = filepath.Join(helperStateDir, "version.json")
+	corePIDPath  = filepath.Join(helperStateDir, "mihomo.pid")
+	coreLockPath = filepath.Join(helperStateDir, "mihomo.lock")
+
+	coreDataDir           = ""
+	coreManagedBinaryPath = ""
+	coreConfigPath        = ""
+	coreLogPath           = ""
+	coreUserHomeDir       = ""
+
+	socketPath = "/var/run/com.clashfox.helper.sock"
+	logPath    = "/var/log/clashfox-helper.log"
+	auditPath  = "/var/log/clashfox-helper-audit.log"
+)
+
+var (
 	allowedCoreBinaries = []string{
 		coreManagedBinaryPath,
-		"/usr/local/bin/mihomo",
-		"/opt/homebrew/bin/mihomo",
 		"/Applications/ClashFox.app/Contents/Resources/mihomo",
 	}
 	coreArgsTemplate = []string{
@@ -100,7 +104,6 @@ type helper struct {
 
 	serviceLocksMu sync.Mutex
 	serviceLocks   map[string]*sync.Mutex
-	tunMu          sync.Mutex
 
 	rateMu   sync.Mutex
 	rl       map[string]*rateBucket
@@ -111,6 +114,8 @@ type helper struct {
 
 	coreMu   sync.Mutex
 	coreLock *os.File
+
+	commandRunner func(kind string, args ...string) ([]byte, error)
 }
 
 type policy struct {
@@ -139,10 +144,13 @@ type baselineState struct {
 }
 
 type proxyDesired struct {
-	Service string `json:"service"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
-	Enabled bool   `json:"enabled"`
+	Service   string `json:"service"`
+	Host      string `json:"host"`
+	Port      int    `json:"port,omitempty"` // backward-compatible alias of httpPort
+	HTTPPort  int    `json:"httpPort,omitempty"`
+	HTTPSPort int    `json:"httpsPort,omitempty"`
+	SOCKSPort int    `json:"socksPort,omitempty"`
+	Enabled   bool   `json:"enabled"`
 }
 
 type dnsDesired struct {
@@ -168,6 +176,17 @@ type coreStatusData struct {
 	Binary  string    `json:"binary,omitempty"`
 	Args    []string  `json:"args,omitempty"`
 	Time    time.Time `json:"time"`
+}
+
+type startupPathStatus struct {
+	Path     string `json:"path"`
+	Exists   bool   `json:"exists"`
+	Mode     string `json:"mode,omitempty"`
+	Owner    string `json:"owner,omitempty"`
+	IsDir    bool   `json:"isDir,omitempty"`
+	IsSocket bool   `json:"isSocket,omitempty"`
+	ACL      string `json:"acl,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 type corePIDRecord struct {
@@ -212,29 +231,35 @@ func (w *statusCapture) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-type setDNSReq struct {
-	Service string   `json:"service"`
-	Servers []string `json:"servers"`
-}
-
 type setProxyReq struct {
-	Service string `json:"service"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
+	Service        string `json:"service"`
+	Host           string `json:"host"`
+	Port           int    `json:"port,omitempty"`
+	HTTPPort       int    `json:"httpPort,omitempty"`
+	HTTPSPort      int    `json:"httpsPort,omitempty"`
+	SOCKSPort      int    `json:"socksPort,omitempty"`
+	MixedPort      int    `json:"mixedPort,omitempty"`
+	HTTPPortKebab  int    `json:"http-port,omitempty"`
+	HTTPSPortKebab int    `json:"https-port,omitempty"`
+	SOCKSPortKebab int    `json:"socks-port,omitempty"`
+	MixedPortKebab int    `json:"mixed-port,omitempty"`
 }
 
-type tunReq struct {
-	EnableIPForward bool `json:"enableIPForward"`
-	EnablePF        bool `json:"enablePF"`
+type serviceOrderEntry struct {
+	Service string
+	Device  string
 }
 
 type proxySnapshot struct {
-	WebEnabled bool
-	WebHost    string
-	WebPort    int
-	SecEnabled bool
-	SecHost    string
-	SecPort    int
+	WebEnabled   bool
+	WebHost      string
+	WebPort      int
+	SecEnabled   bool
+	SecHost      string
+	SecPort      int
+	SocksEnabled bool
+	SocksHost    string
+	SocksPort    int
 }
 
 type xucred struct {
@@ -269,6 +294,13 @@ func main() {
 	}
 	defer closeAudit()
 
+	if err := refreshCoreRuntimePaths(); err != nil {
+		logger.Fatalf("resolve core runtime paths: %v", err)
+	}
+	if err := validateCoreRuntimePaths(); err != nil {
+		logger.Fatalf("invalid core runtime path policy: %v", err)
+	}
+
 	tok, err := ensureToken(tokenPath)
 	if err != nil {
 		logger.Fatalf("ensure token: %v", err)
@@ -279,13 +311,16 @@ func main() {
 		logger.Fatalf("ensure policy: %v", err)
 	}
 
+	loadedState := trimStateForMinimalScope(loadStateBestEffort(statePath, logger))
+	loadedBaseline := trimBaselineForMinimalScope(loadBaselineBestEffort(baselinePath, logger))
+
 	h := &helper{
 		token:        strings.TrimSpace(tok),
 		log:          logger,
 		audit:        audit,
 		policy:       pol,
-		state:        loadStateBestEffort(statePath, logger),
-		baseline:     loadBaselineBestEffort(baselinePath, logger),
+		state:        loadedState,
+		baseline:     loadedBaseline,
 		serviceLocks: map[string]*sync.Mutex{},
 		rl:           map[string]*rateBucket{},
 		breaker:      map[string]*breakerState{},
@@ -304,9 +339,12 @@ func main() {
 		},
 	}
 	h.saveVersionInfo()
+	if err := h.enforceTokenPermissions(); err != nil {
+		logger.Fatalf("secure token permission failed: %v", err)
+	}
 
-	if err := os.RemoveAll(socketPath); err != nil {
-		logger.Fatalf("remove stale socket: %v", err)
+	if err := prepareSocketPath(socketPath); err != nil {
+		logger.Fatalf("prepare socket path: %v", err)
 	}
 
 	ln, err := net.Listen("unix", socketPath)
@@ -315,8 +353,8 @@ func main() {
 	}
 	defer ln.Close()
 
-	if err := os.Chmod(socketPath, 0o666); err != nil {
-		logger.Fatalf("chmod socket: %v", err)
+	if err := h.enforceSocketPermissions(socketPath); err != nil {
+		logger.Fatalf("secure socket permission failed: %v", err)
 	}
 
 	srv := &http.Server{
@@ -376,15 +414,22 @@ func ensureToken(path string) (string, error) {
 		return "", err
 	}
 	t := hex.EncodeToString(raw)
-	tmp := path + ".new." + strconv.Itoa(os.Getpid())
-	if err := os.WriteFile(tmp, []byte(t+"\n"), 0o600); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := writeFileAtomic(path, []byte(t+"\n"), 0o600); err != nil {
 		return "", err
 	}
 	return t, nil
+}
+
+func writeFileAtomic(path string, content []byte, mode os.FileMode) error {
+	tmp := path + ".new." + strconv.Itoa(os.Getpid())
+	if err := os.WriteFile(tmp, content, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func ensurePolicy(path string) (policy, error) {
@@ -400,7 +445,7 @@ func ensurePolicy(path string) (policy, error) {
 	uid := consoleUIDBestEffort()
 	p := policy{
 		AllowedUIDs:                []uint32{0, uid},
-		AllowedClientPathPrefixes:  []string{"/Applications/ClashFox.app/", "/usr/local/bin/clashfox", "/usr/bin/curl"},
+		AllowedClientPathPrefixes:  []string{"/Applications/ClashFox.app/", "/usr/local/bin/clashfox"},
 		EnableCallerPathConstraint: true,
 	}
 	normalizePolicy(&p)
@@ -459,6 +504,91 @@ func consoleUIDBestEffort() uint32 {
 	return st.Uid
 }
 
+func refreshCoreRuntimePaths() error {
+	uid := consoleUIDBestEffort()
+	home := consoleHomeDirBestEffort(uid)
+	dataDir, binPath, confPath, logPath, err := deriveCoreRuntimePaths(home)
+	if err != nil {
+		return err
+	}
+	coreDataDir = dataDir
+	coreManagedBinaryPath = binPath
+	coreConfigPath = confPath
+	coreLogPath = logPath
+	coreUserHomeDir = home
+	allowedCoreBinaries = []string{
+		coreManagedBinaryPath,
+		"/Applications/ClashFox.app/Contents/Resources/mihomo",
+	}
+	coreArgsTemplate = []string{
+		"-d", coreDataDir,
+		"-f", coreConfigPath,
+	}
+	return nil
+}
+
+func deriveCoreRuntimePaths(home string) (string, string, string, string, error) {
+	home = filepath.Clean(strings.TrimSpace(home))
+	if home == "" || home == "." || home == "/" {
+		return "", "", "", "", errors.New("no active user home resolved for core runtime")
+	}
+	if !strings.HasPrefix(home, "/Users/") {
+		return "", "", "", "", fmt.Errorf("invalid home for core runtime: %s", home)
+	}
+	base := filepath.Join(home, "Library", "Application Support", "ClashFox")
+	dataDir := filepath.Join(base, "core")
+	binPath := filepath.Join(dataDir, "mihomo")
+	confPath := filepath.Join(base, "config", "config.yaml")
+	logPath := filepath.Join(base, "logs", "clashfox.log")
+	return dataDir, binPath, confPath, logPath, nil
+}
+
+func validateCoreRuntimePaths() error {
+	home := filepath.Clean(strings.TrimSpace(coreUserHomeDir))
+	if home == "" || !strings.HasPrefix(home, "/Users/") {
+		return errors.New("missing user home for core runtime")
+	}
+	base := filepath.Join(home, "Library", "Application Support", "ClashFox")
+	if !pathWithinBase(coreDataDir, base) {
+		return fmt.Errorf("core data dir out of base: %s", coreDataDir)
+	}
+	if !pathWithinBase(coreManagedBinaryPath, base) {
+		return fmt.Errorf("core binary path out of base: %s", coreManagedBinaryPath)
+	}
+	if !pathWithinBase(coreConfigPath, base) {
+		return fmt.Errorf("core config path out of base: %s", coreConfigPath)
+	}
+	logBase := filepath.Join(base, "logs")
+	if !pathWithinBase(coreLogPath, logBase) {
+		return fmt.Errorf("core log path out of logs base: %s", coreLogPath)
+	}
+	return nil
+}
+
+func pathWithinBase(path, base string) bool {
+	path = filepath.Clean(strings.TrimSpace(path))
+	base = filepath.Clean(strings.TrimSpace(base))
+	if path == "" || base == "" || !filepath.IsAbs(path) || !filepath.IsAbs(base) {
+		return false
+	}
+	if path == base {
+		return true
+	}
+	return strings.HasPrefix(path, base+string(os.PathSeparator))
+}
+
+func consoleHomeDirBestEffort(uid uint32) string {
+	u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	if err == nil && strings.HasPrefix(strings.TrimSpace(u.HomeDir), "/Users/") {
+		return u.HomeDir
+	}
+	sudoUser := strings.TrimSpace(os.Getenv("SUDO_USER"))
+	if sudoUser != "" {
+		return filepath.Join("/Users", sudoUser)
+	}
+	return ""
+}
+
 func loadStateBestEffort(path string, logger *log.Logger) desiredState {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -475,10 +605,13 @@ func loadStateBestEffort(path string, logger *log.Logger) desiredState {
 		if old.Proxy != nil && old.Proxy.Service != "" {
 			migrated.Proxy = map[string]proxyDesired{
 				old.Proxy.Service: {
-					Service: old.Proxy.Service,
-					Host:    old.Proxy.Host,
-					Port:    old.Proxy.Port,
-					Enabled: old.Proxy.Enabled,
+					Service:   old.Proxy.Service,
+					Host:      old.Proxy.Host,
+					Port:      old.Proxy.Port,
+					HTTPPort:  old.Proxy.Port,
+					HTTPSPort: old.Proxy.Port,
+					SOCKSPort: old.Proxy.Port,
+					Enabled:   old.Proxy.Enabled,
 				},
 			}
 		}
@@ -522,6 +655,20 @@ func cloneDesiredState(in desiredState) desiredState {
 		tun := *in.TUN
 		out.TUN = &tun
 	}
+	return out
+}
+
+func trimStateForMinimalScope(in desiredState) desiredState {
+	out := cloneDesiredState(in)
+	out.DNS = nil
+	out.TUN = nil
+	return out
+}
+
+func trimBaselineForMinimalScope(in baselineState) baselineState {
+	out := in
+	out.DNS = nil
+	out.TUN = nil
 	return out
 }
 
@@ -590,12 +737,6 @@ func (h *helper) withServiceLock(service string, fn func() error) error {
 
 	lk.Lock()
 	defer lk.Unlock()
-	return fn()
-}
-
-func (h *helper) withTunLock(fn func() error) error {
-	h.tunMu.Lock()
-	defer h.tunMu.Unlock()
 	return fn()
 }
 
@@ -670,20 +811,14 @@ func (h *helper) routes() http.Handler {
 	mux.HandleFunc("/health", h.withGuards("health", func(w http.ResponseWriter, _ *http.Request) {
 		h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "alive"})
 	}))
-	mux.HandleFunc("/v1/proxy/global", h.withGuards("proxy_global", h.setGlobalProxy))
-	mux.HandleFunc("/v1/proxy/off", h.withGuards("proxy_off", h.disableProxy))
-	mux.HandleFunc("/v1/dns/set", h.withGuards("dns_set", h.setDNS))
-	mux.HandleFunc("/v1/tun/enable", h.withGuards("tun_enable", h.enableTUNMode))
-	mux.HandleFunc("/v1/tun/disable", h.withGuards("tun_disable", h.disableTUNMode))
-	mux.HandleFunc("/v1/state/restore", h.withGuards("state_restore", h.restoreBaselineState))
+	mux.HandleFunc("/v1/proxy/enable", h.withGuards("proxy_enable", h.enableProxy))
+	mux.HandleFunc("/v1/proxy/disable", h.withGuards("proxy_disable", h.disableProxy))
 	mux.HandleFunc("/v1/version", h.withGuards("version", h.versionInfo))
+	mux.HandleFunc("/v1/startup/check", h.withGuards("startup_check", h.startupCheck))
 	mux.HandleFunc("/v1/core/start", h.withGuards("core_start", h.coreStart))
 	mux.HandleFunc("/v1/core/stop", h.withGuards("core_stop", h.coreStop))
 	mux.HandleFunc("/v1/core/restart", h.withGuards("core_restart", h.coreRestart))
 	mux.HandleFunc("/v1/core/status", h.withGuards("core_status", h.coreStatus))
-	mux.HandleFunc("/v1/core/reload", h.withGuards("core_reload", h.coreReload))
-	mux.HandleFunc("/v1/core/config/validate", h.withGuards("core_config_validate", h.coreConfigValidate))
-	mux.HandleFunc("/v1/core/switch", h.withGuards("core_switch", h.coreSwitch))
 	return h.logRequests(mux)
 }
 
@@ -698,6 +833,11 @@ func (h *helper) logRequests(next http.Handler) http.Handler {
 func (h *helper) withGuards(action string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ci := h.callerFromReq(r)
+		if ci.PID <= 0 {
+			h.auditf(action, ci, false, "caller pid unavailable")
+			h.writeErr(w, http.StatusForbidden, "FORBIDDEN_CALLER", "forbidden caller")
+			return
+		}
 		callerKey := h.callerKey(ci)
 		if blocked, remain := h.breakerBlocked(callerKey); blocked {
 			h.auditf(action, ci, false, fmt.Sprintf("circuit open, retry after %s", remain.Truncate(time.Second)))
@@ -709,7 +849,7 @@ func (h *helper) withGuards(action string, next http.HandlerFunc) http.HandlerFu
 			h.writeErr(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many requests")
 			return
 		}
-		if r.Header.Get("X-Helper-Token") != h.token {
+		if !secureTokenMatch(h.token, r.Header.Get("X-Helper-Token")) {
 			h.auditf(action, ci, false, "unauthorized token")
 			h.writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
 			h.recordOutcome(callerKey, false)
@@ -820,7 +960,7 @@ func (h *helper) allowedCaller(ci callerInfo) bool {
 	return false
 }
 
-func (h *helper) setGlobalProxy(w http.ResponseWriter, r *http.Request) {
+func (h *helper) enableProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 		return
@@ -829,17 +969,20 @@ func (h *helper) setGlobalProxy(w http.ResponseWriter, r *http.Request) {
 	ci := h.callerFromReq(r)
 	var req setProxyReq
 	if err := decodeJSON(r.Body, &req); err != nil {
-		h.auditf("proxy_global", ci, false, err.Error())
+		h.auditf("proxy_enable", ci, false, err.Error())
 		h.writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 		return
 	}
-	if err := h.validateService(req.Service); err != nil {
-		h.auditf("proxy_global", ci, false, err.Error())
+	service, err := h.resolveService(req.Service)
+	if err != nil {
+		h.auditf("proxy_enable", ci, false, err.Error())
 		h.writeErr(w, http.StatusBadRequest, "INVALID_SERVICE", err.Error())
 		return
 	}
-	if !validProxyHost(req.Host) || req.Port <= 0 || req.Port > 65535 {
-		h.auditf("proxy_global", ci, false, "invalid proxy host/port")
+	req.Service = service
+	webPort, secPort, socksPort, err := resolveProxyPorts(req)
+	if !validProxyHost(req.Host) || err != nil {
+		h.auditf("proxy_enable", ci, false, "invalid proxy host/port")
 		h.writeErr(w, http.StatusBadRequest, "INVALID_PROXY", "invalid proxy host/port")
 		return
 	}
@@ -856,20 +999,29 @@ func (h *helper) setGlobalProxy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if curWebOn && curSecOn && curWebHost == req.Host && curSecHost == req.Host && curWebPort == req.Port && curSecPort == req.Port {
+		curSocksOn, curSocksHost, curSocksPort, err := h.getSOCKSProxyConfig(req.Service)
+		if err != nil {
+			return err
+		}
+		if curWebOn && curSecOn && curSocksOn &&
+			curWebHost == req.Host && curSecHost == req.Host && curSocksHost == req.Host &&
+			curWebPort == webPort && curSecPort == secPort && curSocksPort == socksPort {
 			noop = true
 			return nil
 		}
 
 		snap := proxySnapshot{
-			WebEnabled: curWebOn,
-			WebHost:    curWebHost,
-			WebPort:    curWebPort,
-			SecEnabled: curSecOn,
-			SecHost:    curSecHost,
-			SecPort:    curSecPort,
+			WebEnabled:   curWebOn,
+			WebHost:      curWebHost,
+			WebPort:      curWebPort,
+			SecEnabled:   curSecOn,
+			SecHost:      curSecHost,
+			SecPort:      curSecPort,
+			SocksEnabled: curSocksOn,
+			SocksHost:    curSocksHost,
+			SocksPort:    curSocksPort,
 		}
-		if err := h.applyProxy(req.Service, req.Host, req.Port, true); err != nil {
+		if err := h.applyProxy(req.Service, req.Host, webPort, secPort, socksPort, true); err != nil {
 			_ = h.restoreProxy(req.Service, snap)
 			return err
 		}
@@ -878,23 +1030,31 @@ func (h *helper) setGlobalProxy(w http.ResponseWriter, r *http.Request) {
 		if h.state.Proxy == nil {
 			h.state.Proxy = map[string]proxyDesired{}
 		}
-		h.state.Proxy[req.Service] = proxyDesired{Service: req.Service, Host: req.Host, Port: req.Port, Enabled: true}
+		h.state.Proxy[req.Service] = proxyDesired{
+			Service:   req.Service,
+			Host:      req.Host,
+			Port:      webPort,
+			HTTPPort:  webPort,
+			HTTPSPort: secPort,
+			SOCKSPort: socksPort,
+			Enabled:   true,
+		}
 		h.stateMu.Unlock()
 		h.saveState()
 		return nil
 	})
 	if opErr != nil {
-		h.auditf("proxy_global", ci, false, "apply failed, rolled back: "+opErr.Error())
+		h.auditf("proxy_enable", ci, false, "apply failed, rolled back: "+opErr.Error())
 		h.writeErr(w, http.StatusInternalServerError, "TXN_APPLY_FAILED", opErr.Error())
 		return
 	}
 	if noop {
-		h.auditf("proxy_global", ci, true, "noop")
+		h.auditf("proxy_enable", ci, true, "noop")
 		h.writeNoop(w, "proxy already matches target")
 		return
 	}
 
-	h.auditf("proxy_global", ci, true, fmt.Sprintf("service=%s host=%s port=%d", req.Service, req.Host, req.Port))
+	h.auditf("proxy_enable", ci, true, fmt.Sprintf("service=%s host=%s http=%d https=%d socks=%d", req.Service, req.Host, webPort, secPort, socksPort))
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true})
 }
 
@@ -909,15 +1069,17 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 		Service string `json:"service"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
-		h.auditf("proxy_off", ci, false, err.Error())
+		h.auditf("proxy_disable", ci, false, err.Error())
 		h.writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 		return
 	}
-	if err := h.validateService(req.Service); err != nil {
-		h.auditf("proxy_off", ci, false, err.Error())
+	service, err := h.resolveService(req.Service)
+	if err != nil {
+		h.auditf("proxy_disable", ci, false, err.Error())
 		h.writeErr(w, http.StatusBadRequest, "INVALID_SERVICE", err.Error())
 		return
 	}
+	req.Service = service
 
 	var opErr error
 	var noop bool
@@ -931,19 +1093,26 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if !curWebOn && !curSecOn {
+		curSocksOn, curSocksHost, curSocksPort, err := h.getSOCKSProxyConfig(req.Service)
+		if err != nil {
+			return err
+		}
+		if !curWebOn && !curSecOn && !curSocksOn {
 			noop = true
 			return nil
 		}
 		snap := proxySnapshot{
-			WebEnabled: curWebOn,
-			WebHost:    curWebHost,
-			WebPort:    curWebPort,
-			SecEnabled: curSecOn,
-			SecHost:    curSecHost,
-			SecPort:    curSecPort,
+			WebEnabled:   curWebOn,
+			WebHost:      curWebHost,
+			WebPort:      curWebPort,
+			SecEnabled:   curSecOn,
+			SecHost:      curSecHost,
+			SecPort:      curSecPort,
+			SocksEnabled: curSocksOn,
+			SocksHost:    curSocksHost,
+			SocksPort:    curSocksPort,
 		}
-		if err := h.applyProxy(req.Service, "", 0, false); err != nil {
+		if err := h.applyProxy(req.Service, "", 0, 0, 0, false); err != nil {
 			_ = h.restoreProxy(req.Service, snap)
 			return err
 		}
@@ -958,248 +1127,18 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if opErr != nil {
-		h.auditf("proxy_off", ci, false, "disable failed, rolled back: "+opErr.Error())
+		h.auditf("proxy_disable", ci, false, "disable failed, rolled back: "+opErr.Error())
 		h.writeErr(w, http.StatusInternalServerError, "TXN_APPLY_FAILED", opErr.Error())
 		return
 	}
 	if noop {
-		h.auditf("proxy_off", ci, true, "noop")
+		h.auditf("proxy_disable", ci, true, "noop")
 		h.writeNoop(w, "proxy already disabled")
 		return
 	}
 
-	h.auditf("proxy_off", ci, true, "service="+req.Service)
+	h.auditf("proxy_disable", ci, true, "service="+req.Service)
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true})
-}
-
-func (h *helper) setDNS(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
-		return
-	}
-
-	ci := h.callerFromReq(r)
-	var req setDNSReq
-	if err := decodeJSON(r.Body, &req); err != nil {
-		h.auditf("dns_set", ci, false, err.Error())
-		h.writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
-	}
-	if err := h.validateService(req.Service); err != nil {
-		h.auditf("dns_set", ci, false, err.Error())
-		h.writeErr(w, http.StatusBadRequest, "INVALID_SERVICE", err.Error())
-		return
-	}
-	if len(req.Servers) == 0 || len(req.Servers) > 3 {
-		h.auditf("dns_set", ci, false, "dns server count must be 1..3")
-		h.writeErr(w, http.StatusBadRequest, "INVALID_DNS_COUNT", "dns server count must be 1..3")
-		return
-	}
-	for _, s := range req.Servers {
-		if ip := net.ParseIP(s); ip == nil {
-			h.auditf("dns_set", ci, false, "invalid dns ip")
-			h.writeErr(w, http.StatusBadRequest, "INVALID_DNS_IP", "invalid dns ip")
-			return
-		}
-	}
-
-	var opErr error
-	var noop bool
-	opErr = h.withServiceLock(req.Service, func() error {
-		h.captureDNSBaselineIfNeeded(req.Service)
-		before, err := h.getDNSServers(req.Service)
-		if err != nil {
-			return err
-		}
-		if sameStringSlice(before, req.Servers) {
-			noop = true
-			return nil
-		}
-		if err := h.setDNSServers(req.Service, req.Servers); err != nil {
-			_ = h.setDNSServers(req.Service, before)
-			return err
-		}
-
-		h.stateMu.Lock()
-		if h.state.DNS == nil {
-			h.state.DNS = map[string]dnsDesired{}
-		}
-		h.state.DNS[req.Service] = dnsDesired{Service: req.Service, Servers: append([]string(nil), req.Servers...)}
-		h.stateMu.Unlock()
-		h.saveState()
-		return nil
-	})
-	if opErr != nil {
-		h.auditf("dns_set", ci, false, "apply failed, rolled back: "+opErr.Error())
-		h.writeErr(w, http.StatusInternalServerError, "TXN_APPLY_FAILED", opErr.Error())
-		return
-	}
-	if noop {
-		h.auditf("dns_set", ci, true, "noop")
-		h.writeNoop(w, "dns already matches target")
-		return
-	}
-
-	h.auditf("dns_set", ci, true, fmt.Sprintf("service=%s servers=%v", req.Service, req.Servers))
-	h.writeJSON(w, http.StatusOK, jsonResp{OK: true})
-}
-
-func (h *helper) enableTUNMode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
-		return
-	}
-	ci := h.callerFromReq(r)
-	var req tunReq
-	if err := decodeJSON(r.Body, &req); err != nil {
-		h.auditf("tun_enable", ci, false, err.Error())
-		h.writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
-	}
-
-	var beforeForward bool
-	var beforePF bool
-	var opErr error
-	var noop bool
-	opErr = h.withTunLock(func() error {
-		h.captureTUNBaselineIfNeeded()
-		var err error
-		beforeForward, err = h.getIPForwarding()
-		if err != nil {
-			return err
-		}
-		beforePF, err = h.getPFEnabled()
-		if err != nil {
-			return err
-		}
-		targetForward := req.EnableIPForward
-		targetPF := req.EnablePF
-		if beforeForward == targetForward && beforePF == targetPF {
-			noop = true
-			return nil
-		}
-
-		if targetForward != beforeForward {
-			if err := h.setIPForwarding(targetForward); err != nil {
-				return err
-			}
-		}
-		if targetPF != beforePF {
-			if err := h.setPF(targetPF); err != nil {
-				_ = h.setIPForwarding(beforeForward)
-				return err
-			}
-		}
-
-		h.stateMu.Lock()
-		h.state.TUN = &tunDesired{IPForward: targetForward, PFEnabled: targetPF}
-		h.stateMu.Unlock()
-		h.saveState()
-		return nil
-	})
-	if opErr != nil {
-		h.auditf("tun_enable", ci, false, "apply failed, rolled back: "+opErr.Error())
-		h.writeErr(w, http.StatusInternalServerError, "TXN_APPLY_FAILED", opErr.Error())
-		return
-	}
-	if noop {
-		h.auditf("tun_enable", ci, true, "noop")
-		h.writeNoop(w, "tun already matches target")
-		return
-	}
-
-	h.auditf("tun_enable", ci, true, fmt.Sprintf("ip_forward=%t pf=%t prev_ip_forward=%t prev_pf=%t", req.EnableIPForward, req.EnablePF, beforeForward, beforePF))
-	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "tun prerequisites enabled"})
-}
-
-func (h *helper) disableTUNMode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
-		return
-	}
-	ci := h.callerFromReq(r)
-	var opErr error
-	var noop bool
-	opErr = h.withTunLock(func() error {
-		h.captureTUNBaselineIfNeeded()
-		beforeForward, err := h.getIPForwarding()
-		if err != nil {
-			return err
-		}
-		beforePF, err := h.getPFEnabled()
-		if err != nil {
-			return err
-		}
-		if !beforeForward && !beforePF {
-			noop = true
-			return nil
-		}
-
-		if err := h.setIPForwarding(false); err != nil {
-			return err
-		}
-		_ = h.setPF(false)
-
-		h.stateMu.Lock()
-		h.state.TUN = &tunDesired{IPForward: false, PFEnabled: false}
-		h.stateMu.Unlock()
-		h.saveState()
-		return nil
-	})
-	if opErr != nil {
-		h.auditf("tun_disable", ci, false, opErr.Error())
-		h.writeErr(w, http.StatusInternalServerError, "TXN_APPLY_FAILED", opErr.Error())
-		return
-	}
-	if noop {
-		h.auditf("tun_disable", ci, true, "noop")
-		h.writeNoop(w, "tun already disabled")
-		return
-	}
-
-	h.auditf("tun_disable", ci, true, "")
-	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "tun prerequisites disabled"})
-}
-
-func (h *helper) restoreBaselineState(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
-		return
-	}
-	ci := h.callerFromReq(r)
-	var req struct {
-		Service string `json:"service,omitempty"`
-	}
-	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if len(bytes.TrimSpace(body)) > 0 {
-		if err := json.Unmarshal(body, &req); err != nil {
-			h.auditf("state_restore", ci, false, "invalid json")
-			h.writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "invalid json")
-			return
-		}
-	}
-
-	h.baselineMu.RLock()
-	b := h.baseline
-	h.baselineMu.RUnlock()
-
-	if req.Service != "" {
-		if err := h.restoreServiceBaseline(req.Service, b); err != nil {
-			h.auditf("state_restore", ci, false, err.Error())
-			h.writeErr(w, http.StatusInternalServerError, "RESTORE_FAILED", err.Error())
-			return
-		}
-		h.auditf("state_restore", ci, true, "service="+req.Service)
-		h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "service baseline restored"})
-		return
-	}
-	if err := h.restoreAllBaseline(b); err != nil {
-		h.auditf("state_restore", ci, false, err.Error())
-		h.writeErr(w, http.StatusInternalServerError, "RESTORE_FAILED", err.Error())
-		return
-	}
-	h.auditf("state_restore", ci, true, "all")
-	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "baseline restored"})
 }
 
 func (h *helper) versionInfo(w http.ResponseWriter, r *http.Request) {
@@ -1210,12 +1149,113 @@ func (h *helper) versionInfo(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Data: map[string]any{"version": h.build}})
 }
 
+func (h *helper) startupCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+		return
+	}
+	h.writeJSON(w, http.StatusOK, jsonResp{
+		OK:   true,
+		Data: h.startupCheckData(),
+	})
+}
+
+func (h *helper) startupCheckData() map[string]any {
+	h.policyMu.RLock()
+	p := h.policy
+	h.policyMu.RUnlock()
+
+	paths := map[string]startupPathStatus{
+		"token":      collectStartupPathStatus(tokenPath),
+		"socket":     collectStartupPathStatus(socketPath),
+		"policy":     collectStartupPathStatus(policyPath),
+		"state":      collectStartupPathStatus(statePath),
+		"baseline":   collectStartupPathStatus(baselinePath),
+		"coreData":   collectStartupPathStatus(coreDataDir),
+		"coreBinary": collectStartupPathStatus(coreManagedBinaryPath),
+		"coreConfig": collectStartupPathStatus(coreConfigPath),
+		"coreLog":    collectStartupPathStatus(coreLogPath),
+		"corePID":    collectStartupPathStatus(corePIDPath),
+		"coreLock":   collectStartupPathStatus(coreLockPath),
+	}
+
+	routes := []string{
+		"/health",
+		"/v1/proxy/enable",
+		"/v1/proxy/disable",
+		"/v1/version",
+		"/v1/startup/check",
+		"/v1/core/start",
+		"/v1/core/stop",
+		"/v1/core/restart",
+		"/v1/core/status",
+	}
+
+	corePolicyErr := ""
+	if err := validateCoreRuntimePaths(); err != nil {
+		corePolicyErr = err.Error()
+	}
+
+	return map[string]any{
+		"time":  time.Now(),
+		"paths": paths,
+		"policySummary": map[string]any{
+			"allowedUIDs":                p.AllowedUIDs,
+			"clientUIDs":                 policyClientUIDs(p),
+			"allowedClientPathPrefixes":  len(p.AllowedClientPathPrefixes),
+			"enableCallerPathConstraint": p.EnableCallerPathConstraint,
+		},
+		"runtimeSummary": map[string]any{
+			"coreArgs":      append([]string(nil), coreArgsTemplate...),
+			"corePathValid": corePolicyErr == "",
+			"corePathError": corePolicyErr,
+			"routes":        routes,
+		},
+	}
+}
+
+func collectStartupPathStatus(path string) startupPathStatus {
+	s := startupPathStatus{Path: path}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return s
+		}
+		s.Error = err.Error()
+		return s
+	}
+	s.Exists = true
+	s.Mode = fi.Mode().String()
+	s.IsDir = fi.IsDir()
+	s.IsSocket = fi.Mode()&os.ModeSocket != 0
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		s.Owner = fmt.Sprintf("%d:%d", st.Uid, st.Gid)
+	}
+	s.ACL = aclSummary(path)
+	return s
+}
+
+func aclSummary(path string) string {
+	out, err := exec.Command("/bin/ls", "-lde", path).CombinedOutput()
+	if err != nil {
+		return strings.TrimSpace(string(out))
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	return lines[0]
+}
+
 func (h *helper) coreStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 		return
 	}
 	running, pid, bin := coreRunningFromPIDFile()
+	if !running && pid > 1 {
+		_ = os.Remove(corePIDPath)
+	}
 	if bin == "" {
 		bin, _ = selectCoreBinary()
 	}
@@ -1311,185 +1351,6 @@ func (h *helper) coreRestart(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "core restarted"})
 }
 
-func (h *helper) coreReload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
-		return
-	}
-	h.coreMu.Lock()
-	defer h.coreMu.Unlock()
-
-	ci := h.callerFromReq(r)
-	running, pid, _ := coreRunningFromPIDFile()
-	if !running {
-		h.auditf("core_reload", ci, true, "noop")
-		h.writeNoop(w, "core not running")
-		return
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		h.auditf("core_reload", ci, false, err.Error())
-		h.writeErr(w, http.StatusInternalServerError, "CORE_RELOAD_FAILED", err.Error())
-		return
-	}
-	if err := proc.Signal(syscall.SIGHUP); err != nil {
-		h.auditf("core_reload", ci, false, err.Error())
-		h.writeErr(w, http.StatusInternalServerError, "CORE_RELOAD_FAILED", err.Error())
-		return
-	}
-	time.Sleep(250 * time.Millisecond)
-	if !pidAlive(pid) {
-		h.auditf("core_reload", ci, false, "core exited after reload signal")
-		h.writeErr(w, http.StatusInternalServerError, "CORE_RELOAD_FAILED", "core exited after reload signal")
-		return
-	}
-	h.auditf("core_reload", ci, true, fmt.Sprintf("pid=%d", pid))
-	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "reload signal sent"})
-}
-
-func (h *helper) coreConfigValidate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
-		return
-	}
-	h.coreMu.Lock()
-	defer h.coreMu.Unlock()
-
-	ci := h.callerFromReq(r)
-	bin := coreManagedBinaryPath
-	if !isExecutableFile(bin) {
-		var err error
-		bin, err = selectCoreBinary()
-		if err != nil {
-			h.auditf("core_config_validate", ci, false, err.Error())
-			h.writeErr(w, http.StatusInternalServerError, "CORE_VALIDATE_FAILED", err.Error())
-			return
-		}
-	}
-	args := append([]string(nil), coreArgsTemplate...)
-	args = append(args, "-t")
-	cmd := exec.Command(bin, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
-		}
-		h.auditf("core_config_validate", ci, false, msg)
-		h.writeErr(w, http.StatusBadRequest, "CORE_CONFIG_INVALID", msg)
-		return
-	}
-	h.auditf("core_config_validate", ci, true, "ok")
-	h.writeJSON(w, http.StatusOK, jsonResp{
-		OK:      true,
-		Message: "config valid",
-		Data: map[string]any{
-			"output": strings.TrimSpace(string(out)),
-		},
-	})
-}
-
-func (h *helper) coreSwitch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
-		return
-	}
-	h.coreMu.Lock()
-	defer h.coreMu.Unlock()
-
-	ci := h.callerFromReq(r)
-	var req struct {
-		Candidate string `json:"candidate"`
-		SHA256    string `json:"sha256,omitempty"`
-	}
-	if err := decodeJSON(r.Body, &req); err != nil {
-		h.auditf("core_switch", ci, false, err.Error())
-		h.writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
-	}
-	if !validCoreCandidate(req.Candidate) {
-		h.auditf("core_switch", ci, false, "invalid candidate")
-		h.writeErr(w, http.StatusBadRequest, "INVALID_CANDIDATE", "invalid candidate")
-		return
-	}
-	src := filepath.Join(coreUpdateDir, req.Candidate)
-	if !isExecutableFile(src) {
-		h.auditf("core_switch", ci, false, "candidate binary not executable")
-		h.writeErr(w, http.StatusBadRequest, "INVALID_CANDIDATE", "candidate binary not executable")
-		return
-	}
-	if err := verifyCoreCandidateSHA256(src, req.SHA256); err != nil {
-		h.auditf("core_switch", ci, false, err.Error())
-		h.writeErr(w, http.StatusBadRequest, "INVALID_CANDIDATE_HASH", err.Error())
-		return
-	}
-
-	wasRunning, pid, _ := coreRunningFromPIDFile()
-	if wasRunning {
-		if err := h.stopCoreLocked(pid); err != nil {
-			h.auditf("core_switch", ci, false, "stop failed: "+err.Error())
-			h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
-			return
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(coreManagedBinaryPath), 0o755); err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
-		return
-	}
-	if err := os.MkdirAll(coreBackupDir, 0o755); err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
-		return
-	}
-
-	backupPath := ""
-	if isExecutableFile(coreManagedBinaryPath) {
-		backupPath = filepath.Join(coreBackupDir, time.Now().Format("20060102-150405")+"-mihomo")
-		if err := copyFile(coreManagedBinaryPath, backupPath, 0o755); err != nil {
-			h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
-			return
-		}
-	}
-
-	tmpPath := coreManagedBinaryPath + ".new." + strconv.Itoa(os.Getpid())
-	if err := copyFile(src, tmpPath, 0o755); err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
-		return
-	}
-	if err := os.Rename(tmpPath, coreManagedBinaryPath); err != nil {
-		_ = os.Remove(tmpPath)
-		h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
-		return
-	}
-
-	if wasRunning {
-		if err := h.startCoreWithBinaryLocked(coreManagedBinaryPath); err != nil {
-			if backupPath != "" {
-				_ = copyFile(backupPath, coreManagedBinaryPath, 0o755)
-				if rbErr := h.startCoreWithBinaryLocked(coreManagedBinaryPath); rbErr != nil {
-					h.auditf("core_switch", ci, false, "rollback restart failed: "+rbErr.Error())
-					h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", "new core failed and rollback restart failed: "+rbErr.Error())
-					return
-				}
-			}
-			h.auditf("core_switch", ci, false, "new binary start failed, rolled back: "+err.Error())
-			h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
-			return
-		}
-	} else {
-		if err := h.validateCoreStartupLocked(coreManagedBinaryPath); err != nil {
-			if backupPath != "" {
-				_ = copyFile(backupPath, coreManagedBinaryPath, 0o755)
-			}
-			h.auditf("core_switch", ci, false, "new binary validation failed, rolled back: "+err.Error())
-			h.writeErr(w, http.StatusInternalServerError, "CORE_SWITCH_FAILED", err.Error())
-			return
-		}
-	}
-	h.auditf("core_switch", ci, true, fmt.Sprintf("candidate=%s switched_to=%s", req.Candidate, coreManagedBinaryPath))
-	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "core switched"})
-}
-
 func (h *helper) startCoreLocked() error {
 	bin, err := selectCoreBinary()
 	if err != nil {
@@ -1499,13 +1360,16 @@ func (h *helper) startCoreLocked() error {
 }
 
 func (h *helper) startCoreWithBinaryLocked(bin string) error {
+	if err := validateCoreRuntimePaths(); err != nil {
+		return err
+	}
 	if !isAllowedCoreBinary(bin) {
 		return errors.New("binary path not allowed")
 	}
-	if err := os.MkdirAll(filepath.Dir(corePIDPath), 0o700); err != nil {
+	if err := validateCoreStartInputs(bin); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(coreLogPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(corePIDPath), 0o700); err != nil {
 		return err
 	}
 
@@ -1539,7 +1403,7 @@ func (h *helper) startCoreWithBinaryLocked(bin string) error {
 		StartedAt: time.Now().Format(time.RFC3339),
 	}
 	pidBytes, _ := json.Marshal(rec)
-	if err := os.WriteFile(corePIDPath, append(pidBytes, '\n'), 0o600); err != nil {
+	if err := writeFileAtomic(corePIDPath, append(pidBytes, '\n'), 0o600); err != nil {
 		_ = cmd.Process.Kill()
 		_ = logf.Close()
 		_ = syscall.Flock(int(lockf.Fd()), syscall.LOCK_UN)
@@ -1548,6 +1412,61 @@ func (h *helper) startCoreWithBinaryLocked(bin string) error {
 	}
 	h.coreLock = lockf
 	go h.watchCoreExit(cmd, logf, lockf)
+	return nil
+}
+
+func validateCoreStartInputs(bin string) error {
+	if fi, err := os.Lstat(bin); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return errors.New("core binary path must not be symlink")
+		}
+	}
+	st, err := os.Stat(bin)
+	if err != nil {
+		return fmt.Errorf("core binary not accessible: %w", err)
+	}
+	if st.IsDir() || st.Mode()&0o111 == 0 {
+		return errors.New("core binary is not executable")
+	}
+
+	if fi, err := os.Lstat(coreConfigPath); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return errors.New("core config path must not be symlink")
+		}
+	}
+	cfg, err := os.Stat(coreConfigPath)
+	if err != nil {
+		return fmt.Errorf("core config not accessible: %w", err)
+	}
+	if cfg.IsDir() {
+		return errors.New("core config path is a directory")
+	}
+
+	data, err := os.Stat(coreDataDir)
+	if err != nil {
+		return fmt.Errorf("core data dir not accessible: %w", err)
+	}
+	if !data.IsDir() {
+		return errors.New("core data path is not a directory")
+	}
+
+	logDir := filepath.Dir(coreLogPath)
+	logDirInfo, err := os.Stat(logDir)
+	if err != nil {
+		return fmt.Errorf("core log dir not accessible: %w", err)
+	}
+	if !logDirInfo.IsDir() {
+		return errors.New("core log dir is not a directory")
+	}
+
+	if fi, err := os.Lstat(coreLogPath); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return errors.New("core log path must not be symlink")
+		}
+		if fi.IsDir() {
+			return errors.New("core log path must be a file")
+		}
+	}
 	return nil
 }
 
@@ -1568,21 +1487,12 @@ func (h *helper) stopCoreLocked(pid int) error {
 	}
 	_ = proc.Signal(syscall.SIGKILL)
 	time.Sleep(500 * time.Millisecond)
+	if pidAlive(pid) {
+		return errors.New("core process still alive after SIGKILL")
+	}
 	_ = os.Remove(corePIDPath)
 	h.releaseCoreLockLocked()
 	return nil
-}
-
-func (h *helper) validateCoreStartupLocked(bin string) error {
-	if err := h.startCoreWithBinaryLocked(bin); err != nil {
-		return err
-	}
-	time.Sleep(400 * time.Millisecond)
-	running, pid, _ := coreRunningFromPIDFile()
-	if !running || pid <= 1 {
-		return errors.New("core failed immediate startup validation")
-	}
-	return h.stopCoreLocked(pid)
 }
 
 func (h *helper) watchCoreExit(cmd *exec.Cmd, logf *os.File, lockf *os.File) {
@@ -1663,44 +1573,6 @@ func isAllowedCoreBinaryPath(path string) bool {
 	return false
 }
 
-func isExecutableFile(path string) bool {
-	st, err := os.Stat(path)
-	if err != nil || st.IsDir() {
-		return false
-	}
-	return st.Mode()&0o111 != 0
-}
-
-func validCoreCandidate(name string) bool {
-	if strings.TrimSpace(name) == "" {
-		return false
-	}
-	if strings.Contains(name, "/") || strings.Contains(name, "..") {
-		return false
-	}
-	re := regexp.MustCompile(`^[a-zA-Z0-9._-]{1,128}$`)
-	return re.MatchString(name)
-}
-
-func copyFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Chmod(mode)
-}
-
 func coreRunningFromPIDFile() (bool, int, string) {
 	rec, err := readCorePIDRecord()
 	if err != nil || rec.PID <= 1 {
@@ -1757,134 +1629,6 @@ func pidMatchesBinary(pid int, expected string) bool {
 	return filepath.Clean(actual) == filepath.Clean(expected)
 }
 
-func verifyCoreCandidateSHA256(path string, reqHash string) error {
-	want := strings.TrimSpace(strings.ToLower(reqHash))
-	if want == "" {
-		shaPath := path + ".sha256"
-		b, err := os.ReadFile(shaPath)
-		if err != nil {
-			return errors.New("sha256 is required (request sha256 or companion .sha256 file)")
-		}
-		fields := strings.Fields(strings.TrimSpace(string(b)))
-		if len(fields) == 0 {
-			return errors.New("empty sha256 file")
-		}
-		want = strings.ToLower(fields[0])
-	}
-	if !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(want) {
-		return errors.New("invalid sha256 format")
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return err
-	}
-	got := hex.EncodeToString(h.Sum(nil))
-	if got != want {
-		return fmt.Errorf("sha256 mismatch: got=%s", got)
-	}
-	return nil
-}
-
-func (h *helper) restoreServiceBaseline(service string, b baselineState) error {
-	found := false
-	if snap, ok := b.Proxy[service]; ok {
-		found = true
-		if err := h.withServiceLock(service, func() error { return h.restoreProxy(service, snap) }); err != nil {
-			return err
-		}
-		h.stateMu.Lock()
-		if h.state.Proxy == nil {
-			h.state.Proxy = map[string]proxyDesired{}
-		}
-		if snap.WebEnabled && snap.SecEnabled && snap.WebHost != "" && snap.WebPort > 0 {
-			h.state.Proxy[service] = proxyDesired{
-				Service: service,
-				Host:    snap.WebHost,
-				Port:    snap.WebPort,
-				Enabled: true,
-			}
-		} else {
-			h.state.Proxy[service] = proxyDesired{Service: service, Enabled: false}
-		}
-		h.stateMu.Unlock()
-	}
-	if dns, ok := b.DNS[service]; ok {
-		found = true
-		if err := h.withServiceLock(service, func() error { return h.setDNSServers(service, dns) }); err != nil {
-			return err
-		}
-		h.stateMu.Lock()
-		if h.state.DNS == nil {
-			h.state.DNS = map[string]dnsDesired{}
-		}
-		h.state.DNS[service] = dnsDesired{Service: service, Servers: append([]string(nil), dns...)}
-		h.stateMu.Unlock()
-	}
-	if !found {
-		return fmt.Errorf("no baseline for service: %s", service)
-	}
-	h.saveState()
-	return nil
-}
-
-func (h *helper) restoreAllBaseline(b baselineState) error {
-	for service, snap := range b.Proxy {
-		svc := service
-		ps := snap
-		if err := h.withServiceLock(svc, func() error { return h.restoreProxy(svc, ps) }); err != nil {
-			return err
-		}
-		h.stateMu.Lock()
-		if h.state.Proxy == nil {
-			h.state.Proxy = map[string]proxyDesired{}
-		}
-		if ps.WebEnabled && ps.SecEnabled && ps.WebHost != "" && ps.WebPort > 0 {
-			h.state.Proxy[svc] = proxyDesired{Service: svc, Host: ps.WebHost, Port: ps.WebPort, Enabled: true}
-		} else {
-			h.state.Proxy[svc] = proxyDesired{Service: svc, Enabled: false}
-		}
-		h.stateMu.Unlock()
-	}
-	for service, dns := range b.DNS {
-		svc := service
-		d := append([]string(nil), dns...)
-		if err := h.withServiceLock(svc, func() error { return h.setDNSServers(svc, d) }); err != nil {
-			return err
-		}
-		h.stateMu.Lock()
-		if h.state.DNS == nil {
-			h.state.DNS = map[string]dnsDesired{}
-		}
-		h.state.DNS[svc] = dnsDesired{Service: svc, Servers: append([]string(nil), d...)}
-		h.stateMu.Unlock()
-	}
-	if b.TUN != nil {
-		bt := *b.TUN
-		if err := h.withTunLock(func() error {
-			if err := h.setIPForwarding(bt.IPForward); err != nil {
-				return err
-			}
-			if err := h.setPF(bt.PFEnabled); err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		h.stateMu.Lock()
-		h.state.TUN = &tunDesired{IPForward: bt.IPForward, PFEnabled: bt.PFEnabled}
-		h.stateMu.Unlock()
-	}
-	h.saveState()
-	return nil
-}
-
 func (h *helper) validateService(service string) error {
 	if !reServiceName.MatchString(service) {
 		return errors.New("invalid service name")
@@ -1897,6 +1641,56 @@ func (h *helper) validateService(service string) error {
 		return fmt.Errorf("service not found: %s", service)
 	}
 	return nil
+}
+
+func (h *helper) resolveService(service string) (string, error) {
+	service = strings.TrimSpace(service)
+	if service != "" {
+		return service, h.validateService(service)
+	}
+	return h.detectPrimaryService()
+}
+
+func (h *helper) detectPrimaryService() (string, error) {
+	services, err := h.availableServices()
+	if err != nil {
+		return "", err
+	}
+
+	routeOut, err := h.runAllowed(cmdRoute, "-n", "get", "default")
+	if err == nil {
+		iface := parseDefaultRouteInterface(routeOut)
+		if iface != "" {
+			orderOut, oErr := h.runAllowed(cmdNetworkSetup, "-listnetworkserviceorder")
+			if oErr == nil {
+				order := parseNetworkServiceOrder(orderOut)
+				for _, ent := range order {
+					if ent.Device == iface {
+						if _, ok := services[ent.Service]; ok {
+							return ent.Service, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	preferred := []string{"Wi-Fi", "Ethernet", "USB 10/100/1000 LAN"}
+	for _, name := range preferred {
+		if _, ok := services[name]; ok {
+			return name, nil
+		}
+	}
+
+	var all []string
+	for name := range services {
+		all = append(all, name)
+	}
+	sort.Strings(all)
+	if len(all) > 0 {
+		return all[0], nil
+	}
+	return "", errors.New("no network services found")
 }
 
 func (h *helper) availableServices() (map[string]struct{}, error) {
@@ -1943,6 +1737,126 @@ func (h *helper) availableServices() (map[string]struct{}, error) {
 	return copyMap, nil
 }
 
+func parseDefaultRouteInterface(out []byte) string {
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if strings.TrimSpace(parts[0]) == "interface" {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
+}
+
+func parseNetworkServiceOrder(out []byte) []serviceOrderEntry {
+	var entries []serviceOrderEntry
+	lines := strings.Split(string(out), "\n")
+	var currentService string
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		const marker = "Device:"
+		if currentService != "" {
+			if idx := strings.Index(line, marker); idx >= 0 {
+				device := strings.TrimSpace(strings.TrimSuffix(line[idx+len(marker):], ")"))
+				if device != "" {
+					entries = append(entries, serviceOrderEntry{
+						Service: currentService,
+						Device:  device,
+					})
+				}
+				currentService = ""
+				continue
+			}
+		}
+		if strings.HasPrefix(line, "(") {
+			end := strings.Index(line, ")")
+			if end >= 0 && end+1 < len(line) {
+				svc := strings.TrimSpace(line[end+1:])
+				svc = strings.TrimPrefix(svc, "*")
+				svc = strings.TrimSpace(svc)
+				currentService = svc
+			}
+			continue
+		}
+	}
+	return entries
+}
+
+func resolveProxyPorts(req setProxyReq) (webPort, secPort, socksPort int, err error) {
+	httpKebab, err := mergedPortValue(req.HTTPPort, req.HTTPPortKebab, "httpPort")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	httpsKebab, err := mergedPortValue(req.HTTPSPort, req.HTTPSPortKebab, "httpsPort")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	socksKebab, err := mergedPortValue(req.SOCKSPort, req.SOCKSPortKebab, "socksPort")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	mixed, err := mergedPortValue(req.MixedPort, req.MixedPortKebab, "mixedPort")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	webPort = firstNonZero(httpKebab, req.Port)
+	secPort = httpsKebab
+	socksPort = socksKebab
+
+	// If only mixed-port is provided, use it for all protocols.
+	if webPort == 0 && secPort == 0 && socksPort == 0 && mixed > 0 {
+		webPort, secPort, socksPort = mixed, mixed, mixed
+	} else {
+		if webPort == 0 {
+			webPort = mixed
+		}
+		if secPort == 0 {
+			secPort = firstNonZero(webPort, mixed)
+		}
+		if socksPort == 0 {
+			socksPort = firstNonZero(webPort, mixed)
+		}
+	}
+
+	if !validPort(webPort) || !validPort(secPort) || !validPort(socksPort) {
+		return 0, 0, 0, errors.New("invalid proxy port")
+	}
+	return webPort, secPort, socksPort, nil
+}
+
+func mergedPortValue(a, b int, field string) (int, error) {
+	if a > 0 && b > 0 && a != b {
+		return 0, fmt.Errorf("conflicting %s values", field)
+	}
+	return firstNonZero(a, b), nil
+}
+
+func firstNonZero(vals ...int) int {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func validPort(port int) bool {
+	return port > 0 && port <= 65535
+}
+
+func desiredProxyPorts(in proxyDesired) (webPort, secPort, socksPort int) {
+	webPort = firstNonZero(in.HTTPPort, in.Port)
+	secPort = firstNonZero(in.HTTPSPort, webPort)
+	socksPort = firstNonZero(in.SOCKSPort, webPort)
+	return
+}
+
 func validProxyHost(host string) bool {
 	h := strings.TrimSpace(strings.ToLower(host))
 	if h == "localhost" {
@@ -1964,13 +1878,20 @@ func (h *helper) readProxySnapshot(service string) (proxySnapshot, error) {
 	if err != nil {
 		return proxySnapshot{}, err
 	}
+	socksEnabled, socksHost, socksPort, err := h.getSOCKSProxyConfig(service)
+	if err != nil {
+		return proxySnapshot{}, err
+	}
 	return proxySnapshot{
-		WebEnabled: webEnabled,
-		WebHost:    webHost,
-		WebPort:    webPort,
-		SecEnabled: secEnabled,
-		SecHost:    secHost,
-		SecPort:    secPort,
+		WebEnabled:   webEnabled,
+		WebHost:      webHost,
+		WebPort:      webPort,
+		SecEnabled:   secEnabled,
+		SecHost:      secHost,
+		SecPort:      secPort,
+		SocksEnabled: socksEnabled,
+		SocksHost:    socksHost,
+		SocksPort:    socksPort,
 	}, nil
 }
 
@@ -1993,14 +1914,26 @@ func (h *helper) restoreProxy(service string, s proxySnapshot) error {
 			return err
 		}
 	}
+	if s.SocksEnabled {
+		if err := h.setSOCKSProxy(service, s.SocksHost, s.SocksPort, true); err != nil {
+			return err
+		}
+	} else {
+		if err := h.setSOCKSProxy(service, "", 0, false); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func (h *helper) applyProxy(service, host string, port int, enable bool) error {
-	if err := h.setOneProxy(service, false, host, port, enable); err != nil {
+func (h *helper) applyProxy(service, host string, webPort, secPort, socksPort int, enable bool) error {
+	if err := h.setOneProxy(service, false, host, webPort, enable); err != nil {
 		return err
 	}
-	if err := h.setOneProxy(service, true, host, port, enable); err != nil {
+	if err := h.setOneProxy(service, true, host, secPort, enable); err != nil {
+		return err
+	}
+	if err := h.setSOCKSProxy(service, host, socksPort, enable); err != nil {
 		return err
 	}
 	return nil
@@ -2043,68 +1976,24 @@ func (h *helper) getProxyConfig(service string, secure bool) (enabled bool, host
 	return parseProxyConfigOutput(out)
 }
 
-func (h *helper) getDNSServers(service string) ([]string, error) {
-	out, err := h.runAllowed(cmdNetworkSetup, "-getdnsservers", service)
+func (h *helper) getSOCKSProxyConfig(service string) (enabled bool, host string, port int, err error) {
+	out, err := h.runAllowed(cmdNetworkSetup, "-getsocksfirewallproxy", service)
 	if err != nil {
-		return nil, err
+		return false, "", 0, err
 	}
-	txt := strings.TrimSpace(string(out))
-	if txt == "" || strings.Contains(txt, "There aren't any DNS Servers set on") {
-		return nil, nil
-	}
-	var servers []string
-	for _, line := range strings.Split(txt, "\n") {
-		line = strings.TrimSpace(line)
-		if ip := net.ParseIP(line); ip != nil {
-			servers = append(servers, line)
+	return parseProxyConfigOutput(out)
+}
+
+func (h *helper) setSOCKSProxy(service string, host string, port int, enable bool) error {
+	if enable {
+		if _, err := h.runAllowed(cmdNetworkSetup, "-setsocksfirewallproxy", service, host, strconv.Itoa(port)); err != nil {
+			return err
 		}
-	}
-	return servers, nil
-}
-
-func (h *helper) setDNSServers(service string, servers []string) error {
-	args := []string{"-setdnsservers", service}
-	if len(servers) == 0 {
-		args = append(args, "empty")
-	} else {
-		args = append(args, servers...)
-	}
-	_, err := h.runAllowed(cmdNetworkSetup, args...)
-	return err
-}
-
-func (h *helper) setIPForwarding(enable bool) error {
-	v := "0"
-	if enable {
-		v = "1"
-	}
-	_, err := h.runAllowed(cmdSysctl, "-w", "net.inet.ip.forwarding="+v)
-	return err
-}
-
-func (h *helper) getIPForwarding() (bool, error) {
-	out, err := h.runAllowed(cmdSysctl, "-n", "net.inet.ip.forwarding")
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(string(out)) == "1", nil
-}
-
-func (h *helper) setPF(enable bool) error {
-	if enable {
-		_, err := h.runAllowed(cmdPFCTL, "-E")
+		_, err := h.runAllowed(cmdNetworkSetup, "-setsocksfirewallproxystate", service, "on")
 		return err
 	}
-	_, err := h.runAllowed(cmdPFCTL, "-d")
+	_, err := h.runAllowed(cmdNetworkSetup, "-setsocksfirewallproxystate", service, "off")
 	return err
-}
-
-func (h *helper) getPFEnabled() (bool, error) {
-	out, err := h.runAllowed(cmdPFCTL, "-s", "info")
-	if err != nil {
-		return false, err
-	}
-	return parsePFStatusOutput(out)
 }
 
 func parseProxyConfigOutput(out []byte) (enabled bool, host string, port int, err error) {
@@ -2132,24 +2021,92 @@ func parseProxyConfigOutput(out []byte) (enabled bool, host string, port int, er
 	return enabled, host, port, nil
 }
 
-func parsePFStatusOutput(out []byte) (bool, error) {
-	txt := string(out)
-	if strings.Contains(txt, "Status: Enabled") {
-		return true, nil
+func policyClientUIDs(p policy) []uint32 {
+	seen := make(map[uint32]struct{})
+	var out []uint32
+	for _, uid := range p.AllowedUIDs {
+		if uid == 0 {
+			continue
+		}
+		if _, ok := seen[uid]; ok {
+			continue
+		}
+		seen[uid] = struct{}{}
+		out = append(out, uid)
 	}
-	if strings.Contains(txt, "Status: Disabled") {
-		return false, nil
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func setACL(path string, mode os.FileMode, uids []uint32, perms string) error {
+	if err := os.Chmod(path, mode); err != nil {
+		return err
 	}
-	return false, errors.New("unexpected pf status")
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	_ = exec.Command("/bin/chmod", "-N", path).Run()
+	for _, uid := range uids {
+		subject := strconv.FormatUint(uint64(uid), 10)
+		if u, err := user.LookupId(subject); err == nil && u.Username != "" {
+			subject = u.Username
+		}
+		rule := fmt.Sprintf("user:%s allow %s", subject, perms)
+		if out, err := exec.Command("/bin/chmod", "+a", rule, path).CombinedOutput(); err != nil {
+			return fmt.Errorf("set acl failed for %s uid=%d: %v (%s)", path, uid, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+func (h *helper) enforceTokenPermissions() error {
+	h.policyMu.RLock()
+	p := h.policy
+	h.policyMu.RUnlock()
+	uids := policyClientUIDs(p)
+	return setACL(tokenPath, 0o600, uids, "read")
+}
+
+func (h *helper) enforceSocketPermissions(path string) error {
+	h.policyMu.RLock()
+	p := h.policy
+	h.policyMu.RUnlock()
+	uids := policyClientUIDs(p)
+	return setACL(path, 0o600, uids, "read,write")
+}
+
+func secureTokenMatch(expect, got string) bool {
+	expect = strings.TrimSpace(expect)
+	got = strings.TrimSpace(got)
+	if expect == "" || got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(expect), []byte(got)) == 1
+}
+
+func prepareSocketPath(path string) error {
+	fi, err := os.Lstat(path)
+	if err == nil {
+		if fi.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("refusing to remove non-socket path: %s", path)
+		}
+		return os.Remove(path)
+	}
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 const (
 	cmdNetworkSetup = "networksetup"
-	cmdSysctl       = "sysctl"
-	cmdPFCTL        = "pfctl"
+	cmdRoute        = "route"
 )
 
 func (h *helper) runAllowed(kind string, args ...string) ([]byte, error) {
+	if h.commandRunner != nil {
+		return h.commandRunner(kind, args...)
+	}
 	bin, err := allowedCommand(kind, args)
 	if err != nil {
 		return nil, err
@@ -2175,32 +2132,28 @@ func allowedCommand(kind string, args []string) (string, error) {
 	switch kind {
 	case cmdNetworkSetup:
 		allowed := map[string]struct{}{
-			"-listallnetworkservices": {},
-			"-setwebproxy":            {},
-			"-setsecurewebproxy":      {},
-			"-setwebproxystate":       {},
-			"-setsecurewebproxystate": {},
-			"-getwebproxy":            {},
-			"-getsecurewebproxy":      {},
-			"-setdnsservers":          {},
-			"-getdnsservers":          {},
+			"-listallnetworkservices":     {},
+			"-listnetworkserviceorder":    {},
+			"-setwebproxy":                {},
+			"-setsecurewebproxy":          {},
+			"-setsocksfirewallproxy":      {},
+			"-setwebproxystate":           {},
+			"-setsecurewebproxystate":     {},
+			"-setsocksfirewallproxystate": {},
+			"-getwebproxy":                {},
+			"-getsecurewebproxy":          {},
+			"-getsocksfirewallproxy":      {},
 		}
 		if _, ok := allowed[sub]; !ok {
 			return "", fmt.Errorf("networksetup subcommand not allowed: %s", sub)
 		}
 		return "/usr/sbin/networksetup", nil
-	case cmdSysctl:
+	case cmdRoute:
 		joined := strings.Join(args, " ")
-		if joined != "-w net.inet.ip.forwarding=0" && joined != "-w net.inet.ip.forwarding=1" && joined != "-n net.inet.ip.forwarding" {
-			return "", errors.New("sysctl args not allowed")
+		if joined != "-n get default" {
+			return "", errors.New("route args not allowed")
 		}
-		return "/usr/sbin/sysctl", nil
-	case cmdPFCTL:
-		joined := strings.Join(args, " ")
-		if joined != "-E" && joined != "-d" && joined != "-s info" {
-			return "", errors.New("pfctl args not allowed")
-		}
-		return "/sbin/pfctl", nil
+		return "/sbin/route", nil
 	default:
 		return "", fmt.Errorf("command kind not allowed: %s", kind)
 	}
@@ -2211,6 +2164,10 @@ func decodeJSON(r io.Reader, dst any) error {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return fmt.Errorf("invalid json: %w", err)
+	}
+	// Ensure there is exactly one JSON value in the body.
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("invalid json: trailing data")
 	}
 	return nil
 }
@@ -2247,56 +2204,6 @@ func (h *helper) captureProxyBaselineIfNeeded(service string) {
 	}
 	if _, ok := h.baseline.Proxy[service]; !ok {
 		h.baseline.Proxy[service] = snap
-		if h.baseline.CapturedAt == "" {
-			h.baseline.CapturedAt = time.Now().Format(time.RFC3339)
-		}
-	}
-	h.baselineMu.Unlock()
-	h.saveBaseline()
-}
-
-func (h *helper) captureDNSBaselineIfNeeded(service string) {
-	h.baselineMu.RLock()
-	_, exists := h.baseline.DNS[service]
-	h.baselineMu.RUnlock()
-	if exists {
-		return
-	}
-	dns, err := h.getDNSServers(service)
-	if err != nil {
-		h.log.Printf("capture dns baseline failed: %v", err)
-		return
-	}
-	h.baselineMu.Lock()
-	if h.baseline.DNS == nil {
-		h.baseline.DNS = map[string][]string{}
-	}
-	if _, ok := h.baseline.DNS[service]; !ok {
-		h.baseline.DNS[service] = append([]string(nil), dns...)
-		if h.baseline.CapturedAt == "" {
-			h.baseline.CapturedAt = time.Now().Format(time.RFC3339)
-		}
-	}
-	h.baselineMu.Unlock()
-	h.saveBaseline()
-}
-
-func (h *helper) captureTUNBaselineIfNeeded() {
-	h.baselineMu.RLock()
-	exists := h.baseline.TUN != nil
-	h.baselineMu.RUnlock()
-	if exists {
-		return
-	}
-	ipForward, err1 := h.getIPForwarding()
-	pfEnabled, err2 := h.getPFEnabled()
-	if err1 != nil || err2 != nil {
-		h.log.Printf("capture tun baseline failed: ip_err=%v pf_err=%v", err1, err2)
-		return
-	}
-	h.baselineMu.Lock()
-	if h.baseline.TUN == nil {
-		h.baseline.TUN = &tunDesired{IPForward: ipForward, PFEnabled: pfEnabled}
 		if h.baseline.CapturedAt == "" {
 			h.baseline.CapturedAt = time.Now().Format(time.RFC3339)
 		}
@@ -2362,34 +2269,41 @@ func (h *helper) reconcileOnce() {
 			service = want.Service
 		}
 		_ = h.withServiceLock(service, func() error {
+			wantWebPort, wantSecPort, wantSocksPort := desiredProxyPorts(want)
 			enabledWeb, webHost, webPort, err1 := h.getProxyConfig(service, false)
 			enabledSec, secHost, secPort, err2 := h.getProxyConfig(service, true)
-			if err1 != nil || err2 != nil {
+			enabledSocks, socksHost, socksPort, err3 := h.getSOCKSProxyConfig(service)
+			if err1 != nil || err2 != nil || err3 != nil {
 				return nil
 			}
 			if want.Enabled {
-				if !enabledWeb || !enabledSec || webHost != want.Host || secHost != want.Host || webPort != want.Port || secPort != want.Port {
+				if !enabledWeb || !enabledSec || !enabledSocks ||
+					webHost != want.Host || secHost != want.Host || socksHost != want.Host ||
+					webPort != wantWebPort || secPort != wantSecPort || socksPort != wantSocksPort {
 					h.driftf(
 						"proxy",
 						service,
-						fmt.Sprintf("enabled=true host=%s port=%d", want.Host, want.Port),
-						fmt.Sprintf("web_enabled=%t web_host=%s web_port=%d sec_enabled=%t sec_host=%s sec_port=%d", enabledWeb, webHost, webPort, enabledSec, secHost, secPort),
+						fmt.Sprintf("enabled=true host=%s http=%d https=%d socks=%d", want.Host, wantWebPort, wantSecPort, wantSocksPort),
+						fmt.Sprintf(
+							"web_enabled=%t web_host=%s web_port=%d sec_enabled=%t sec_host=%s sec_port=%d socks_enabled=%t socks_host=%s socks_port=%d",
+							enabledWeb, webHost, webPort, enabledSec, secHost, secPort, enabledSocks, socksHost, socksPort,
+						),
 					)
-					if err := h.applyProxy(service, want.Host, want.Port, true); err != nil {
+					if err := h.applyProxy(service, want.Host, wantWebPort, wantSecPort, wantSocksPort, true); err != nil {
 						h.log.Printf("self-heal proxy apply failed: %v", err)
 					} else {
 						h.log.Printf("self-heal proxy reapplied for service=%s", service)
 					}
 				}
 			} else {
-				if enabledWeb || enabledSec {
+				if enabledWeb || enabledSec || enabledSocks {
 					h.driftf(
 						"proxy",
 						service,
 						"enabled=false",
-						fmt.Sprintf("web_enabled=%t sec_enabled=%t", enabledWeb, enabledSec),
+						fmt.Sprintf("web_enabled=%t sec_enabled=%t socks_enabled=%t", enabledWeb, enabledSec, enabledSocks),
 					)
-					if err := h.applyProxy(service, "", 0, false); err != nil {
+					if err := h.applyProxy(service, "", 0, 0, 0, false); err != nil {
 						h.log.Printf("self-heal proxy disable failed: %v", err)
 					} else {
 						h.log.Printf("self-heal proxy disabled for service=%s", service)
@@ -2399,49 +2313,4 @@ func (h *helper) reconcileOnce() {
 			return nil
 		})
 	}
-
-	for svc, dns := range s.DNS {
-		service := svc
-		want := dns
-		if want.Service != "" {
-			service = want.Service
-		}
-		_ = h.withServiceLock(service, func() error {
-			cur, err := h.getDNSServers(service)
-			if err == nil && !sameStringSlice(cur, want.Servers) {
-				h.driftf("dns", service, strings.Join(want.Servers, ","), strings.Join(cur, ","))
-				if err := h.setDNSServers(service, want.Servers); err != nil {
-					h.log.Printf("self-heal dns failed: %v", err)
-				} else {
-					h.log.Printf("self-heal dns reapplied for service=%s", service)
-				}
-			}
-			return nil
-		})
-	}
-
-	if s.TUN != nil {
-		_ = h.withTunLock(func() error {
-			if got, err := h.getIPForwarding(); err == nil && got != s.TUN.IPForward {
-				h.driftf("tun_ip_forward", "", strconv.FormatBool(s.TUN.IPForward), strconv.FormatBool(got))
-				_ = h.setIPForwarding(s.TUN.IPForward)
-			}
-			if got, err := h.getPFEnabled(); err == nil && got != s.TUN.PFEnabled {
-				h.driftf("tun_pf", "", strconv.FormatBool(s.TUN.PFEnabled), strconv.FormatBool(got))
-				_ = h.setPF(s.TUN.PFEnabled)
-			}
-			return nil
-		})
-	}
-}
-
-func sameStringSlice(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	aCopy := append([]string(nil), a...)
-	bCopy := append([]string(nil), b...)
-	sort.Strings(aCopy)
-	sort.Strings(bCopy)
-	return bytes.Equal([]byte(strings.Join(aCopy, ",")), []byte(strings.Join(bCopy, ",")))
 }

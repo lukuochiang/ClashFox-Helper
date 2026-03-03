@@ -201,10 +201,16 @@ repair_helper() {
   sleep 1
   # Ensure GUI process can read helper token; token may be created shortly after launch.
   chmod 755 "$HELPER_PATH" >/dev/null 2>&1 || true
+  local console_uid
+  console_uid="$(stat -f '%u' /dev/console 2>/dev/null || true)"
   local attempt=0
   while [ "$attempt" -lt 25 ]; do
     if [ -f "$TOKEN_PATH" ]; then
-      chmod 644 "$TOKEN_PATH" >/dev/null 2>&1 || true
+      chmod 600 "$TOKEN_PATH" >/dev/null 2>&1 || true
+      chmod -N "$TOKEN_PATH" >/dev/null 2>&1 || true
+      if [ -n "$console_uid" ] && [ "$console_uid" != "0" ]; then
+        chmod +a "user:${console_uid} allow read" "$TOKEN_PATH" >/dev/null 2>&1 || true
+      fi
       break
     fi
     attempt=$((attempt + 1))
