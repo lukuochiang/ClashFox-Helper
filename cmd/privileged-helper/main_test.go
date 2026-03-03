@@ -77,6 +77,40 @@ func TestParseProxyConfigOutput_Enabled(t *testing.T) {
 	}
 }
 
+func TestParseAutoProxyDiscoveryOutput(t *testing.T) {
+	enabled, err := parseAutoProxyDiscoveryOutput([]byte("Auto Proxy Discovery: On\n"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !enabled {
+		t.Fatalf("expected enabled")
+	}
+	enabled, err = parseAutoProxyDiscoveryOutput([]byte("Auto Proxy Discovery: Off\n"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if enabled {
+		t.Fatalf("expected disabled")
+	}
+}
+
+func TestParseAutoProxyURLOutput(t *testing.T) {
+	enabled, url, err := parseAutoProxyURLOutput([]byte("URL: http://127.0.0.1:6152/proxy.pac\nEnabled: Yes\n"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !enabled || url != "http://127.0.0.1:6152/proxy.pac" {
+		t.Fatalf("unexpected result enabled=%t url=%q", enabled, url)
+	}
+	enabled, url, err = parseAutoProxyURLOutput([]byte("URL: \nEnabled: No\n"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if enabled || url != "" {
+		t.Fatalf("unexpected result enabled=%t url=%q", enabled, url)
+	}
+}
+
 func TestParseDefaultRouteInterface(t *testing.T) {
 	out := []byte(`route to: default
 destination: default
@@ -117,6 +151,21 @@ func TestAllowedCommand_RouteDefaultOnly(t *testing.T) {
 	}
 	if _, err := allowedCommand(cmdRoute, []string{"get", "default"}); err == nil {
 		t.Fatalf("expected rejection for invalid route args")
+	}
+}
+
+func TestAllowedCommand_NetworkSetupAutoProxyCommands(t *testing.T) {
+	cases := [][]string{
+		{"-setautoproxyurl", "Wi-Fi", "http://127.0.0.1/proxy.pac"},
+		{"-setautoproxystate", "Wi-Fi", "off"},
+		{"-setproxyautodiscovery", "Wi-Fi", "off"},
+		{"-getautoproxyurl", "Wi-Fi"},
+		{"-getproxyautodiscovery", "Wi-Fi"},
+	}
+	for _, args := range cases {
+		if _, err := allowedCommand(cmdNetworkSetup, args); err != nil {
+			t.Fatalf("expected command allowed for args=%v, err=%v", args, err)
+		}
 	}
 }
 
@@ -573,5 +622,123 @@ func TestStartupCheckEndpoint(t *testing.T) {
 	}
 	if _, ok := resp.Data.Runtime["routes"]; !ok {
 		t.Fatalf("expected routes in runtime summary")
+	}
+}
+
+func TestDisableProxy_NoOpAtBaselineClearsDesiredAndBaseline(t *testing.T) {
+	h := newHandlerTestHelper()
+	h.servicesCache = map[string]struct{}{"Wi-Fi": {}}
+	h.servicesAt = time.Now()
+	h.state.Proxy = map[string]proxyDesired{
+		"Wi-Fi": {
+			Service: "Wi-Fi",
+			Host:    "127.0.0.1",
+			Enabled: true,
+		},
+	}
+	h.baseline.Proxy = map[string]proxySnapshot{
+		"Wi-Fi": {
+			WebEnabled:           false,
+			WebHost:              "",
+			WebPort:              0,
+			SecEnabled:           false,
+			SecHost:              "",
+			SecPort:              0,
+			SocksEnabled:         false,
+			SocksHost:            "",
+			SocksPort:            0,
+			AutoDiscoveryEnabled: false,
+			AutoConfigEnabled:    false,
+			AutoConfigURL:        "",
+		},
+	}
+	h.commandRunner = func(kind string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "-getwebproxy", "-getsecurewebproxy", "-getsocksfirewallproxy":
+			return []byte("Enabled: No\nServer: \nPort: 0\n"), nil
+		case "-getproxyautodiscovery":
+			return []byte("Auto Proxy Discovery: Off\n"), nil
+		case "-getautoproxyurl":
+			return []byte("URL: \nEnabled: No\n"), nil
+		default:
+			t.Fatalf("unexpected command: kind=%s args=%v", kind, args)
+			return nil, nil
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/proxy/disable", strings.NewReader(`{"service":"Wi-Fi"}`))
+	rr := httptest.NewRecorder()
+	h.disableProxy(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		OK   bool   `json:"ok"`
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !resp.OK || resp.Code != "NOOP" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if _, ok := h.state.Proxy["Wi-Fi"]; ok {
+		t.Fatalf("expected desired proxy state cleared after noop baseline disable")
+	}
+	if _, ok := h.baseline.Proxy["Wi-Fi"]; ok {
+		t.Fatalf("expected baseline proxy cleared after noop baseline disable")
+	}
+}
+
+func TestDisableProxy_NoBaselineAllDisabledConvergesStateToDisabled(t *testing.T) {
+	h := newHandlerTestHelper()
+	h.servicesCache = map[string]struct{}{"Wi-Fi": {}}
+	h.servicesAt = time.Now()
+	h.state.Proxy = map[string]proxyDesired{
+		"Wi-Fi": {
+			Service: "Wi-Fi",
+			Host:    "127.0.0.1",
+			Enabled: true,
+		},
+	}
+	h.baseline.Proxy = map[string]proxySnapshot{}
+	h.commandRunner = func(kind string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "-getwebproxy", "-getsecurewebproxy", "-getsocksfirewallproxy":
+			return []byte("Enabled: No\nServer: \nPort: 0\n"), nil
+		case "-getproxyautodiscovery":
+			return []byte("Auto Proxy Discovery: Off\n"), nil
+		case "-getautoproxyurl":
+			return []byte("URL: \nEnabled: No\n"), nil
+		default:
+			t.Fatalf("unexpected command: kind=%s args=%v", kind, args)
+			return nil, nil
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/proxy/disable", strings.NewReader(`{"service":"Wi-Fi"}`))
+	rr := httptest.NewRecorder()
+	h.disableProxy(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		OK   bool   `json:"ok"`
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !resp.OK || resp.Code != "NOOP" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	got, ok := h.state.Proxy["Wi-Fi"]
+	if !ok {
+		t.Fatalf("expected proxy desired state retained as explicit disabled")
+	}
+	if got.Enabled {
+		t.Fatalf("expected desired state converged to disabled, got %+v", got)
 	}
 }

@@ -259,15 +259,18 @@ type serviceOrderEntry struct {
 }
 
 type proxySnapshot struct {
-	WebEnabled   bool
-	WebHost      string
-	WebPort      int
-	SecEnabled   bool
-	SecHost      string
-	SecPort      int
-	SocksEnabled bool
-	SocksHost    string
-	SocksPort    int
+	WebEnabled           bool
+	WebHost              string
+	WebPort              int
+	SecEnabled           bool
+	SecHost              string
+	SecPort              int
+	SocksEnabled         bool
+	SocksHost            string
+	SocksPort            int
+	AutoDiscoveryEnabled bool
+	AutoConfigEnabled    bool
+	AutoConfigURL        string
 }
 
 type xucred struct {
@@ -1196,39 +1199,48 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 	var opErr error
 	var noop bool
 	opErr = h.withServiceLock(req.Service, func() error {
-		h.captureProxyBaselineIfNeeded(req.Service)
-		curWebOn, curWebHost, curWebPort, err := h.getProxyConfig(req.Service, false)
+		current, err := h.readProxySnapshot(req.Service)
 		if err != nil {
 			return err
 		}
-		curSecOn, curSecHost, curSecPort, err := h.getProxyConfig(req.Service, true)
-		if err != nil {
-			return err
-		}
-		curSocksOn, curSocksHost, curSocksPort, err := h.getSOCKSProxyConfig(req.Service)
-		if err != nil {
-			return err
-		}
-		if !curWebOn && !curSecOn && !curSocksOn {
+		baseline, hasBaseline := h.proxyBaselineForService(req.Service)
+
+		if hasBaseline && proxySnapshotEqual(current, baseline) {
+			h.clearProxyDesiredState(req.Service)
+			h.clearProxyBaseline(req.Service)
+			h.saveState()
+			h.saveBaseline()
 			noop = true
 			return nil
 		}
-		snap := proxySnapshot{
-			WebEnabled:   curWebOn,
-			WebHost:      curWebHost,
-			WebPort:      curWebPort,
-			SecEnabled:   curSecOn,
-			SecHost:      curSecHost,
-			SecPort:      curSecPort,
-			SocksEnabled: curSocksOn,
-			SocksHost:    curSocksHost,
-			SocksPort:    curSocksPort,
-		}
-		if err := h.applyProxy(req.Service, "", 0, 0, 0, false); err != nil {
-			_ = h.restoreProxy(req.Service, snap)
-			return err
+		if !hasBaseline && snapshotAllProxyModesDisabled(current) {
+			h.stateMu.Lock()
+			if h.state.Proxy == nil {
+				h.state.Proxy = map[string]proxyDesired{}
+			}
+			h.state.Proxy[req.Service] = proxyDesired{Service: req.Service, Enabled: false}
+			h.stateMu.Unlock()
+			h.saveState()
+			noop = true
+			return nil
 		}
 
+		if hasBaseline {
+			if err := h.restoreProxy(req.Service, baseline); err != nil {
+				_ = h.restoreProxy(req.Service, current)
+				return err
+			}
+			h.clearProxyDesiredState(req.Service)
+			h.clearProxyBaseline(req.Service)
+			h.saveState()
+			h.saveBaseline()
+			return nil
+		}
+
+		if err := h.disableAllProxyModes(req.Service); err != nil {
+			_ = h.restoreProxy(req.Service, current)
+			return err
+		}
 		h.stateMu.Lock()
 		if h.state.Proxy == nil {
 			h.state.Proxy = map[string]proxyDesired{}
@@ -2082,16 +2094,27 @@ func (h *helper) readProxySnapshot(service string) (proxySnapshot, error) {
 	if err != nil {
 		return proxySnapshot{}, err
 	}
+	autoDiscoveryEnabled, err := h.getAutoProxyDiscoveryConfig(service)
+	if err != nil {
+		return proxySnapshot{}, err
+	}
+	autoConfigEnabled, autoConfigURL, err := h.getAutoProxyConfig(service)
+	if err != nil {
+		return proxySnapshot{}, err
+	}
 	return proxySnapshot{
-		WebEnabled:   webEnabled,
-		WebHost:      webHost,
-		WebPort:      webPort,
-		SecEnabled:   secEnabled,
-		SecHost:      secHost,
-		SecPort:      secPort,
-		SocksEnabled: socksEnabled,
-		SocksHost:    socksHost,
-		SocksPort:    socksPort,
+		WebEnabled:           webEnabled,
+		WebHost:              webHost,
+		WebPort:              webPort,
+		SecEnabled:           secEnabled,
+		SecHost:              secHost,
+		SecPort:              secPort,
+		SocksEnabled:         socksEnabled,
+		SocksHost:            socksHost,
+		SocksPort:            socksPort,
+		AutoDiscoveryEnabled: autoDiscoveryEnabled,
+		AutoConfigEnabled:    autoConfigEnabled,
+		AutoConfigURL:        autoConfigURL,
 	}, nil
 }
 
@@ -2123,6 +2146,12 @@ func (h *helper) restoreProxy(service string, s proxySnapshot) error {
 			return err
 		}
 	}
+	if err := h.setAutoProxyDiscovery(service, s.AutoDiscoveryEnabled); err != nil {
+		return err
+	}
+	if err := h.setAutoProxyConfig(service, s.AutoConfigURL, s.AutoConfigEnabled); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -2134,6 +2163,19 @@ func (h *helper) applyProxy(service, host string, webPort, secPort, socksPort in
 		return err
 	}
 	if err := h.setSOCKSProxy(service, host, socksPort, enable); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (h *helper) disableAllProxyModes(service string) error {
+	if err := h.applyProxy(service, "", 0, 0, 0, false); err != nil {
+		return err
+	}
+	if err := h.setAutoProxyDiscovery(service, false); err != nil {
+		return err
+	}
+	if err := h.setAutoProxyConfig(service, "", false); err != nil {
 		return err
 	}
 	return nil
@@ -2184,6 +2226,30 @@ func (h *helper) getSOCKSProxyConfig(service string) (enabled bool, host string,
 	return parseProxyConfigOutput(out)
 }
 
+func (h *helper) getAutoProxyDiscoveryConfig(service string) (bool, error) {
+	out, err := h.runAllowed(cmdNetworkSetup, "-getproxyautodiscovery", service)
+	if err != nil {
+		return false, err
+	}
+	enabled, err := parseAutoProxyDiscoveryOutput(out)
+	if err != nil {
+		return false, err
+	}
+	return enabled, nil
+}
+
+func (h *helper) getAutoProxyConfig(service string) (enabled bool, url string, err error) {
+	out, err := h.runAllowed(cmdNetworkSetup, "-getautoproxyurl", service)
+	if err != nil {
+		return false, "", err
+	}
+	enabled, url, err = parseAutoProxyURLOutput(out)
+	if err != nil {
+		return false, "", err
+	}
+	return enabled, url, nil
+}
+
 func (h *helper) setSOCKSProxy(service string, host string, port int, enable bool) error {
 	if enable {
 		if _, err := h.runAllowed(cmdNetworkSetup, "-setsocksfirewallproxy", service, host, strconv.Itoa(port)); err != nil {
@@ -2193,6 +2259,31 @@ func (h *helper) setSOCKSProxy(service string, host string, port int, enable boo
 		return err
 	}
 	_, err := h.runAllowed(cmdNetworkSetup, "-setsocksfirewallproxystate", service, "off")
+	return err
+}
+
+func (h *helper) setAutoProxyDiscovery(service string, enable bool) error {
+	state := "off"
+	if enable {
+		state = "on"
+	}
+	_, err := h.runAllowed(cmdNetworkSetup, "-setproxyautodiscovery", service, state)
+	return err
+}
+
+func (h *helper) setAutoProxyConfig(service string, url string, enable bool) error {
+	if enable {
+		url = strings.TrimSpace(url)
+		if url == "" {
+			return errors.New("missing auto proxy url for enabled state")
+		}
+		if _, err := h.runAllowed(cmdNetworkSetup, "-setautoproxyurl", service, url); err != nil {
+			return err
+		}
+		_, err := h.runAllowed(cmdNetworkSetup, "-setautoproxystate", service, "on")
+		return err
+	}
+	_, err := h.runAllowed(cmdNetworkSetup, "-setautoproxystate", service, "off")
 	return err
 }
 
@@ -2219,6 +2310,62 @@ func parseProxyConfigOutput(out []byte) (enabled bool, host string, port int, er
 		// networksetup off-state may still be valid. keep permissive.
 	}
 	return enabled, host, port, nil
+}
+
+func parseAutoProxyDiscoveryOutput(out []byte) (bool, error) {
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k := strings.TrimSpace(parts[0])
+		v := strings.TrimSpace(parts[1])
+		if !strings.EqualFold(k, "Auto Proxy Discovery") && !strings.EqualFold(k, "Enabled") {
+			continue
+		}
+		if b, ok := parseProxyStateBool(v); ok {
+			return b, nil
+		}
+	}
+	return false, fmt.Errorf("parse auto proxy discovery output failed: %q", strings.TrimSpace(string(out)))
+}
+
+func parseAutoProxyURLOutput(out []byte) (enabled bool, url string, err error) {
+	haveEnabled := false
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k := strings.TrimSpace(parts[0])
+		v := strings.TrimSpace(parts[1])
+		switch {
+		case strings.EqualFold(k, "Enabled"):
+			b, ok := parseProxyStateBool(v)
+			if !ok {
+				return false, "", fmt.Errorf("parse auto proxy enabled failed: %q", v)
+			}
+			enabled = b
+			haveEnabled = true
+		case strings.EqualFold(k, "URL"):
+			url = v
+		}
+	}
+	if !haveEnabled {
+		return false, "", fmt.Errorf("parse auto proxy url output failed: %q", strings.TrimSpace(string(out)))
+	}
+	return enabled, url, nil
+}
+
+func parseProxyStateBool(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "yes", "on", "1", "true":
+		return true, true
+	case "no", "off", "0", "false":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func policyClientUIDs(p policy) []uint32 {
@@ -2337,12 +2484,17 @@ func allowedCommand(kind string, args []string) (string, error) {
 			"-setwebproxy":                {},
 			"-setsecurewebproxy":          {},
 			"-setsocksfirewallproxy":      {},
+			"-setautoproxyurl":            {},
 			"-setwebproxystate":           {},
 			"-setsecurewebproxystate":     {},
 			"-setsocksfirewallproxystate": {},
+			"-setautoproxystate":          {},
+			"-setproxyautodiscovery":      {},
 			"-getwebproxy":                {},
 			"-getsecurewebproxy":          {},
 			"-getsocksfirewallproxy":      {},
+			"-getautoproxyurl":            {},
+			"-getproxyautodiscovery":      {},
 		}
 		if _, ok := allowed[sub]; !ok {
 			return "", fmt.Errorf("networksetup subcommand not allowed: %s", sub)
@@ -2421,6 +2573,53 @@ func (h *helper) captureProxyBaselineIfNeeded(service string) {
 	}
 	h.baselineMu.Unlock()
 	h.saveBaseline()
+}
+
+func (h *helper) proxyBaselineForService(service string) (proxySnapshot, bool) {
+	h.baselineMu.RLock()
+	defer h.baselineMu.RUnlock()
+	if h.baseline.Proxy == nil {
+		return proxySnapshot{}, false
+	}
+	s, ok := h.baseline.Proxy[service]
+	return s, ok
+}
+
+func (h *helper) clearProxyBaseline(service string) {
+	h.baselineMu.Lock()
+	defer h.baselineMu.Unlock()
+	if h.baseline.Proxy == nil {
+		return
+	}
+	delete(h.baseline.Proxy, service)
+}
+
+func (h *helper) clearProxyDesiredState(service string) {
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	if h.state.Proxy == nil {
+		return
+	}
+	delete(h.state.Proxy, service)
+}
+
+func proxySnapshotEqual(a, b proxySnapshot) bool {
+	return a.WebEnabled == b.WebEnabled &&
+		a.WebHost == b.WebHost &&
+		a.WebPort == b.WebPort &&
+		a.SecEnabled == b.SecEnabled &&
+		a.SecHost == b.SecHost &&
+		a.SecPort == b.SecPort &&
+		a.SocksEnabled == b.SocksEnabled &&
+		a.SocksHost == b.SocksHost &&
+		a.SocksPort == b.SocksPort &&
+		a.AutoDiscoveryEnabled == b.AutoDiscoveryEnabled &&
+		a.AutoConfigEnabled == b.AutoConfigEnabled &&
+		a.AutoConfigURL == b.AutoConfigURL
+}
+
+func snapshotAllProxyModesDisabled(s proxySnapshot) bool {
+	return !s.WebEnabled && !s.SecEnabled && !s.SocksEnabled && !s.AutoDiscoveryEnabled && !s.AutoConfigEnabled
 }
 
 func (h *helper) auditf(action string, ci callerInfo, ok bool, msg string) {
@@ -2507,14 +2706,22 @@ func (h *helper) reconcileOnce() {
 					}
 				}
 			} else {
-				if enabledWeb || enabledSec || enabledSocks {
+				autoDiscoveryEnabled, err4 := h.getAutoProxyDiscoveryConfig(service)
+				autoConfigEnabled, _, err5 := h.getAutoProxyConfig(service)
+				if err4 != nil || err5 != nil {
+					return nil
+				}
+				if enabledWeb || enabledSec || enabledSocks || autoDiscoveryEnabled || autoConfigEnabled {
 					h.driftf(
 						"proxy",
 						service,
 						"enabled=false",
-						fmt.Sprintf("web_enabled=%t sec_enabled=%t socks_enabled=%t", enabledWeb, enabledSec, enabledSocks),
+						fmt.Sprintf(
+							"web_enabled=%t sec_enabled=%t socks_enabled=%t auto_discovery_enabled=%t auto_config_enabled=%t",
+							enabledWeb, enabledSec, enabledSocks, autoDiscoveryEnabled, autoConfigEnabled,
+						),
 					)
-					if err := h.applyProxy(service, "", 0, 0, 0, false); err != nil {
+					if err := h.disableAllProxyModes(service); err != nil {
 						h.log.Printf("self-heal proxy disable failed: %v", err)
 					} else {
 						h.log.Printf("self-heal proxy disabled for service=%s", service)
