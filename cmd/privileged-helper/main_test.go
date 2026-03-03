@@ -398,7 +398,7 @@ func TestValidateCoreStartInputs_RejectsSymlink(t *testing.T) {
 	coreDataDir = dataDir
 	coreLogPath = logPath
 
-	if err := validateCoreStartInputs(bin); err != nil {
+	if err := validateCoreStartInputs(bin, cfg); err != nil {
 		t.Fatalf("expected valid inputs, got %v", err)
 	}
 
@@ -407,8 +407,52 @@ func TestValidateCoreStartInputs_RejectsSymlink(t *testing.T) {
 		t.Fatalf("create symlink cfg: %v", err)
 	}
 	coreConfigPath = symCfg
-	if err := validateCoreStartInputs(bin); err == nil {
+	if err := validateCoreStartInputs(bin, symCfg); err == nil {
 		t.Fatalf("expected symlink config to be rejected")
+	}
+}
+
+func TestResolveCoreConfigPath(t *testing.T) {
+	oldHome := coreUserHomeDir
+	oldCfg := coreConfigPath
+	t.Cleanup(func() {
+		coreUserHomeDir = oldHome
+		coreConfigPath = oldCfg
+	})
+
+	coreUserHomeDir = "/Users/alice"
+	coreConfigPath = "/Users/alice/Library/Application Support/ClashFox/config/config.yaml"
+
+	cfg, err := resolveCoreConfigPath("")
+	if err != nil {
+		t.Fatalf("empty config path should use default: %v", err)
+	}
+	if cfg != coreConfigPath {
+		t.Fatalf("unexpected default config path: %q", cfg)
+	}
+
+	cfg, err = resolveCoreConfigPath("OneSmart.yaml")
+	if err != nil {
+		t.Fatalf("relative config file should be accepted: %v", err)
+	}
+	want := "/Users/alice/Library/Application Support/ClashFox/config/OneSmart.yaml"
+	if cfg != want {
+		t.Fatalf("unexpected resolved config path: got=%q want=%q", cfg, want)
+	}
+
+	cfg, err = resolveCoreConfigPath("/Users/alice/Library/Application Support/ClashFox/config/OnePro.yaml")
+	if err != nil {
+		t.Fatalf("absolute config file should be accepted: %v", err)
+	}
+	if cfg != "/Users/alice/Library/Application Support/ClashFox/config/OnePro.yaml" {
+		t.Fatalf("unexpected absolute config path: %q", cfg)
+	}
+
+	if _, err := resolveCoreConfigPath("../escape.yaml"); err == nil {
+		t.Fatalf("expected path traversal to be rejected")
+	}
+	if _, err := resolveCoreConfigPath("/tmp/other.yaml"); err == nil {
+		t.Fatalf("expected out-of-base config path to be rejected")
 	}
 }
 

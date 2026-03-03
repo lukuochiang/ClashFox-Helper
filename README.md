@@ -117,7 +117,9 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
 ```bash
 curl --unix-socket /var/run/com.clashfox.helper.sock \
   -H "X-Helper-Token: ${TOKEN}" \
-  -X POST http://localhost/v1/core/start
+  -H "Content-Type: application/json" \
+  -X POST http://localhost/v1/core/start \
+  -d '{"configPath":"default.yaml"}'
 
 curl --unix-socket /var/run/com.clashfox.helper.sock \
   -H "X-Helper-Token: ${TOKEN}" \
@@ -132,12 +134,16 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
   -X POST http://localhost/v1/core/stop
 ```
 
+说明：`/v1/core/start` 支持可选 JSON 参数 `configPath`（兼容别名 `config`），可传相对文件名（例如 `OneSmart.yaml`）或绝对路径。  
+当省略该参数时，默认使用 `/Users/<name>/Library/Application Support/ClashFox/config/config.yaml`。  
+为安全起见，配置路径仅允许位于 `/Users/<name>/Library/Application Support/ClashFox/config/` 目录下。
+
 完整调用示例（精简版）：[API_DEMO.md](/Users/workstation/os-code/ClashFox-Helper/docs/API_DEMO.md)
 
 约束说明（已内置）：
 
 - 只允许白名单二进制路径：`/usr/local/bin/mihomo`、`/opt/homebrew/bin/mihomo`、`/Applications/ClashFox.app/Contents/Resources/mihomo`
-- 固定参数模板：`-d /Library/Application Support/ClashFox/core -f /Library/Application Support/ClashFox/core/config.yaml`
+- core 启动参数：`-d /Users/<name>/Library/Application Support/ClashFox/core -f <selected-config-path>`（`-f` 由 `/v1/core/start` 动态决定）
 - `pidfile + lockfile` 防止重复实例
 - `pidfile` 为结构化记录（pid+binary+startedAt），并校验 PID 对应二进制路径，降低 PID 复用误操作风险
 - 退出码写入审计日志（`act=core_exit`）

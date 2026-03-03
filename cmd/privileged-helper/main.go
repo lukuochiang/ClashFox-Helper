@@ -190,9 +190,10 @@ type startupPathStatus struct {
 }
 
 type corePIDRecord struct {
-	PID       int    `json:"pid"`
-	Binary    string `json:"binary"`
-	StartedAt string `json:"startedAt"`
+	PID       int      `json:"pid"`
+	Binary    string   `json:"binary"`
+	StartedAt string   `json:"startedAt"`
+	Args      []string `json:"args,omitempty"`
 }
 
 type buildInfo struct {
@@ -1259,13 +1260,19 @@ func (h *helper) coreStatus(w http.ResponseWriter, r *http.Request) {
 	if bin == "" {
 		bin, _ = selectCoreBinary()
 	}
+	args := append([]string(nil), coreArgsTemplate...)
+	if running {
+		if rec, err := readCorePIDRecord(); err == nil && rec.PID == pid && len(rec.Args) > 0 {
+			args = append([]string(nil), rec.Args...)
+		}
+	}
 	h.writeJSON(w, http.StatusOK, jsonResp{
 		OK: true,
 		Data: coreStatusData{
 			Running: running,
 			PID:     pid,
 			Binary:  bin,
-			Args:    append([]string(nil), coreArgsTemplate...),
+			Args:    args,
 			Time:    time.Now(),
 		},
 	})
@@ -1280,18 +1287,33 @@ func (h *helper) coreStart(w http.ResponseWriter, r *http.Request) {
 	defer h.coreMu.Unlock()
 
 	ci := h.callerFromReq(r)
+	var req struct {
+		ConfigPath string `json:"configPath"`
+		Config     string `json:"config"`
+	}
+	if err := decodeOptionalJSON(r.Body, &req); err != nil {
+		h.auditf("core_start", ci, false, err.Error())
+		h.writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	configPathReq := strings.TrimSpace(req.ConfigPath)
+	if configPathReq == "" {
+		configPathReq = strings.TrimSpace(req.Config)
+	}
+
 	running, pid, _ := coreRunningFromPIDFile()
 	if running {
 		h.auditf("core_start", ci, true, fmt.Sprintf("noop pid=%d", pid))
 		h.writeNoop(w, "core already running")
 		return
 	}
-	if err := h.startCoreLocked(); err != nil {
+	startedConfigPath, err := h.startCoreLocked(configPathReq)
+	if err != nil {
 		h.auditf("core_start", ci, false, err.Error())
 		h.writeErr(w, http.StatusInternalServerError, "CORE_START_FAILED", err.Error())
 		return
 	}
-	h.auditf("core_start", ci, true, "started")
+	h.auditf("core_start", ci, true, "started config="+startedConfigPath)
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "core started"})
 }
 
@@ -1329,6 +1351,15 @@ func (h *helper) coreRestart(w http.ResponseWriter, r *http.Request) {
 
 	ci := h.callerFromReq(r)
 	wasRunning, pid, oldBinary := coreRunningFromPIDFile()
+	restartConfigPath := ""
+	if rec, err := readCorePIDRecord(); err == nil && rec.PID == pid && len(rec.Args) >= 4 {
+		for i := 0; i+1 < len(rec.Args); i++ {
+			if rec.Args[i] == "-f" {
+				restartConfigPath = strings.TrimSpace(rec.Args[i+1])
+				break
+			}
+		}
+	}
 	if wasRunning {
 		if err := h.stopCoreLocked(pid); err != nil {
 			h.auditf("core_restart", ci, false, "stop failed: "+err.Error())
@@ -1338,9 +1369,9 @@ func (h *helper) coreRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	startErr := error(nil)
 	if wasRunning && oldBinary != "" {
-		startErr = h.startCoreWithBinaryLocked(oldBinary)
+		_, startErr = h.startCoreWithBinaryLocked(oldBinary, restartConfigPath)
 	} else {
-		startErr = h.startCoreLocked()
+		_, startErr = h.startCoreLocked("")
 	}
 	if startErr != nil {
 		h.auditf("core_restart", ci, false, "start failed: "+startErr.Error())
@@ -1351,56 +1382,65 @@ func (h *helper) coreRestart(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "core restarted"})
 }
 
-func (h *helper) startCoreLocked() error {
+func (h *helper) startCoreLocked(configPathReq string) (string, error) {
 	bin, err := selectCoreBinary()
 	if err != nil {
-		return err
+		return "", err
 	}
-	return h.startCoreWithBinaryLocked(bin)
+	return h.startCoreWithBinaryLocked(bin, configPathReq)
 }
 
-func (h *helper) startCoreWithBinaryLocked(bin string) error {
+func (h *helper) startCoreWithBinaryLocked(bin string, configPathReq string) (string, error) {
 	if err := validateCoreRuntimePaths(); err != nil {
-		return err
+		return "", err
 	}
 	if !isAllowedCoreBinary(bin) {
-		return errors.New("binary path not allowed")
+		return "", errors.New("binary path not allowed")
 	}
-	if err := validateCoreStartInputs(bin); err != nil {
-		return err
+	configPath, err := resolveCoreConfigPath(configPathReq)
+	if err != nil {
+		return "", err
+	}
+	if err := validateCoreStartInputs(bin, configPath); err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(corePIDPath), 0o700); err != nil {
-		return err
+		return "", err
+	}
+	coreArgs := []string{
+		"-d", coreDataDir,
+		"-f", configPath,
 	}
 
 	lockf, err := os.OpenFile(coreLockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := syscall.Flock(int(lockf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = lockf.Close()
-		return errors.New("core lock is held")
+		return "", errors.New("core lock is held")
 	}
 
 	logf, err := os.OpenFile(coreLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		_ = syscall.Flock(int(lockf.Fd()), syscall.LOCK_UN)
 		_ = lockf.Close()
-		return err
+		return "", err
 	}
-	cmd := exec.Command(bin, coreArgsTemplate...)
+	cmd := exec.Command(bin, coreArgs...)
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	if err := cmd.Start(); err != nil {
 		_ = logf.Close()
 		_ = syscall.Flock(int(lockf.Fd()), syscall.LOCK_UN)
 		_ = lockf.Close()
-		return err
+		return "", err
 	}
 	rec := corePIDRecord{
 		PID:       cmd.Process.Pid,
 		Binary:    bin,
 		StartedAt: time.Now().Format(time.RFC3339),
+		Args:      append([]string(nil), coreArgs...),
 	}
 	pidBytes, _ := json.Marshal(rec)
 	if err := writeFileAtomic(corePIDPath, append(pidBytes, '\n'), 0o600); err != nil {
@@ -1408,14 +1448,32 @@ func (h *helper) startCoreWithBinaryLocked(bin string) error {
 		_ = logf.Close()
 		_ = syscall.Flock(int(lockf.Fd()), syscall.LOCK_UN)
 		_ = lockf.Close()
-		return err
+		return "", err
 	}
 	h.coreLock = lockf
 	go h.watchCoreExit(cmd, logf, lockf)
-	return nil
+	return configPath, nil
 }
 
-func validateCoreStartInputs(bin string) error {
+func resolveCoreConfigPath(configPathReq string) (string, error) {
+	req := strings.TrimSpace(configPathReq)
+	if req == "" {
+		return coreConfigPath, nil
+	}
+	configBase := filepath.Join(coreUserHomeDir, "Library", "Application Support", "ClashFox", "config")
+	cfg := req
+	if filepath.IsAbs(req) {
+		cfg = filepath.Clean(req)
+	} else {
+		cfg = filepath.Clean(filepath.Join(configBase, req))
+	}
+	if !pathWithinBase(cfg, configBase) {
+		return "", fmt.Errorf("core config path out of base: %s", cfg)
+	}
+	return cfg, nil
+}
+
+func validateCoreStartInputs(bin string, configPath string) error {
 	if fi, err := os.Lstat(bin); err == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return errors.New("core binary path must not be symlink")
@@ -1429,12 +1487,12 @@ func validateCoreStartInputs(bin string) error {
 		return errors.New("core binary is not executable")
 	}
 
-	if fi, err := os.Lstat(coreConfigPath); err == nil {
+	if fi, err := os.Lstat(configPath); err == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return errors.New("core config path must not be symlink")
 		}
 	}
-	cfg, err := os.Stat(coreConfigPath)
+	cfg, err := os.Stat(configPath)
 	if err != nil {
 		return fmt.Errorf("core config not accessible: %w", err)
 	}
@@ -2170,6 +2228,17 @@ func decodeJSON(r io.Reader, dst any) error {
 		return errors.New("invalid json: trailing data")
 	}
 	return nil
+}
+
+func decodeOptionalJSON(r io.Reader, dst any) error {
+	b, err := io.ReadAll(io.LimitReader(r, 1<<20))
+	if err != nil {
+		return fmt.Errorf("invalid json: %w", err)
+	}
+	if len(strings.TrimSpace(string(b))) == 0 {
+		return nil
+	}
+	return decodeJSON(strings.NewReader(string(b)), dst)
 }
 
 func (h *helper) writeErr(w http.ResponseWriter, status int, code, msg string) {
