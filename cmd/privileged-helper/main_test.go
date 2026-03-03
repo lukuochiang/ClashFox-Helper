@@ -284,7 +284,7 @@ func TestDeriveCoreRuntimePaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if data != "/Users/alice/Library/Application Support/ClashFox/core" {
+	if data != "/Users/alice/Library/Application Support/ClashFox/data" {
 		t.Fatalf("unexpected data path: %q", data)
 	}
 	if bin != "/Users/alice/Library/Application Support/ClashFox/core/mihomo" {
@@ -334,7 +334,7 @@ func TestValidateCoreRuntimePaths(t *testing.T) {
 	})
 
 	coreUserHomeDir = "/Users/alice"
-	coreDataDir = "/Users/alice/Library/Application Support/ClashFox/core"
+	coreDataDir = "/Users/alice/Library/Application Support/ClashFox/data"
 	coreManagedBinaryPath = "/Users/alice/Library/Application Support/ClashFox/core/mihomo"
 	coreConfigPath = "/Users/alice/Library/Application Support/ClashFox/config/config.yaml"
 	coreLogPath = "/Users/alice/Library/Application Support/ClashFox/logs/clashfox.log"

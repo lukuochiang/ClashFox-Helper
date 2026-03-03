@@ -537,8 +537,8 @@ func deriveCoreRuntimePaths(home string) (string, string, string, string, error)
 		return "", "", "", "", fmt.Errorf("invalid home for core runtime: %s", home)
 	}
 	base := filepath.Join(home, "Library", "Application Support", "ClashFox")
-	dataDir := filepath.Join(base, "core")
-	binPath := filepath.Join(dataDir, "mihomo")
+	dataDir := filepath.Join(base, "data")
+	binPath := filepath.Join(base, "core", "mihomo")
 	confPath := filepath.Join(base, "config", "config.yaml")
 	logPath := filepath.Join(base, "logs", "clashfox.log")
 	return dataDir, binPath, confPath, logPath, nil
@@ -1400,6 +1400,9 @@ func (h *helper) startCoreWithBinaryLocked(bin string, configPathReq string) (st
 	configPath, err := resolveCoreConfigPath(configPathReq)
 	if err != nil {
 		return "", err
+	}
+	if err := os.MkdirAll(coreDataDir, 0o755); err != nil {
+		return "", fmt.Errorf("create core data dir: %w", err)
 	}
 	if err := validateCoreStartInputs(bin, configPath); err != nil {
 		return "", err
