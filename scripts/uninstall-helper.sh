@@ -27,14 +27,6 @@ mkdir -p "${BACKUP_DIR}"
 chown root:wheel "${BACKUP_ROOT}" "${BACKUP_DIR}" >/dev/null 2>&1 || true
 chmod 755 "${BACKUP_ROOT}" "${BACKUP_DIR}" >/dev/null 2>&1 || true
 
-# Collect stray files in backup root into current batch directory.
-if [[ -f "${BACKUP_ROOT}/${LABEL}" ]]; then
-  mv "${BACKUP_ROOT}/${LABEL}" "${BACKUP_DIR}/${LABEL}.stray"
-fi
-if [[ -f "${BACKUP_ROOT}/${LABEL}.plist" ]]; then
-  mv "${BACKUP_ROOT}/${LABEL}.plist" "${BACKUP_DIR}/${LABEL}.plist.stray"
-fi
-
 if [[ -f "${PLIST_DST}" ]]; then
   mv "${PLIST_DST}" "${BACKUP_DIR}/${LABEL}.plist"
 fi
