@@ -161,6 +161,10 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
 3. 按实际 App 安装位置维护 `policy.json` 中的 `allowedClientPathPrefixes`，避免误拦截。
 4. 版本兼容测试建议包含 macOS 12/13/14/15（尤其 `networksetup` 输出和 `pfctl` 状态解析差异）。
 
+## 许可证
+
+本项目采用 **GNU GPL v3.0**（`GPL-3.0-only`）开源许可，详见仓库根目录 [LICENSE](/Users/workstation/os-code/ClashFox-Helper/LICENSE)。
+
 ## 常用操作
 
 开启系统代理（`service` 可省略，自动解析主网络服务）：

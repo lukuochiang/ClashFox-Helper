@@ -87,11 +87,12 @@ make_variant() {
   cp scripts/check-helper.sh "${stage_dir}/"
   cp VERSION "${stage_dir}/"
   cp README.md "${stage_dir}/"
+  cp LICENSE "${stage_dir}/"
   gen_changelog "${stage_dir}/CHANGELOG.md"
 
   (
     cd "${stage_dir}"
-    shasum -a 256 com.clashfox.helper com.clashfox.helper.plist install-helper.sh uninstall-helper.sh doctor-helper.sh check-helper.sh VERSION README.md CHANGELOG.md > checksums.txt
+    shasum -a 256 com.clashfox.helper com.clashfox.helper.plist install-helper.sh uninstall-helper.sh doctor-helper.sh check-helper.sh VERSION README.md LICENSE CHANGELOG.md > checksums.txt
   )
 
   build_meta="{\"version\":\"${VERSION}\",\"gitCommit\":\"${COMMIT}\",\"buildTime\":\"${BUILD_TIME}\",\"launchedAt\":\"\"}"
@@ -122,7 +123,8 @@ JSON
       checksums.txt \
       manifest.json \
       README.md \
-      CHANGELOG.md
+      CHANGELOG.md \
+      LICENSE
   )
 
   echo "release package ready: ${tarball}"
