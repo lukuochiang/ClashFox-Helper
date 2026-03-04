@@ -742,3 +742,90 @@ func TestDisableProxy_NoBaselineAllDisabledConvergesStateToDisabled(t *testing.T
 		t.Fatalf("expected desired state converged to disabled, got %+v", got)
 	}
 }
+
+func TestProxyStatusEndpoint(t *testing.T) {
+	h := newHandlerTestHelper()
+	h.servicesCache = map[string]struct{}{"Wi-Fi": {}}
+	h.servicesAt = time.Now()
+	h.commandRunner = func(kind string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "-getwebproxy":
+			return []byte("Enabled: Yes\nServer: 127.0.0.1\nPort: 6152\n"), nil
+		case "-getsecurewebproxy":
+			return []byte("Enabled: Yes\nServer: 127.0.0.1\nPort: 6152\n"), nil
+		case "-getsocksfirewallproxy":
+			return []byte("Enabled: No\nServer: \nPort: 0\n"), nil
+		case "-getproxyautodiscovery":
+			return []byte("Auto Proxy Discovery: Off\n"), nil
+		case "-getautoproxyurl":
+			return []byte("URL: http://127.0.0.1:6152/proxy.pac\nEnabled: Yes\n"), nil
+		default:
+			t.Fatalf("unexpected command: kind=%s args=%v", kind, args)
+			return nil, nil
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/proxy/status?service=Wi-Fi", nil)
+	req = withCaller(req)
+	req.Header.Set("X-Helper-Token", "test-token")
+	rr := httptest.NewRecorder()
+	h.routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Service    string `json:"service"`
+			AnyEnabled bool   `json:"anyEnabled"`
+			HTTP       struct {
+				Enabled bool   `json:"enabled"`
+				Server  string `json:"server"`
+				Port    int    `json:"port"`
+			} `json:"http"`
+			HTTPS struct {
+				Enabled bool   `json:"enabled"`
+				Server  string `json:"server"`
+				Port    int    `json:"port"`
+			} `json:"https"`
+			SOCKS struct {
+				Enabled bool `json:"enabled"`
+			} `json:"socks"`
+			AutoDiscovery struct {
+				Enabled bool `json:"enabled"`
+			} `json:"autoDiscovery"`
+			AutoConfig struct {
+				Enabled bool   `json:"enabled"`
+				URL     string `json:"url"`
+			} `json:"autoConfig"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("expected ok=true")
+	}
+	if resp.Data.Service != "Wi-Fi" {
+		t.Fatalf("unexpected service: %q", resp.Data.Service)
+	}
+	if !resp.Data.AnyEnabled {
+		t.Fatalf("expected anyEnabled=true")
+	}
+	if !resp.Data.HTTP.Enabled || resp.Data.HTTP.Server != "127.0.0.1" || resp.Data.HTTP.Port != 6152 {
+		t.Fatalf("unexpected http status: %+v", resp.Data.HTTP)
+	}
+	if !resp.Data.HTTPS.Enabled || resp.Data.HTTPS.Server != "127.0.0.1" || resp.Data.HTTPS.Port != 6152 {
+		t.Fatalf("unexpected https status: %+v", resp.Data.HTTPS)
+	}
+	if resp.Data.SOCKS.Enabled {
+		t.Fatalf("expected socks disabled")
+	}
+	if resp.Data.AutoDiscovery.Enabled {
+		t.Fatalf("expected autoDiscovery disabled")
+	}
+	if !resp.Data.AutoConfig.Enabled || resp.Data.AutoConfig.URL != "http://127.0.0.1:6152/proxy.pac" {
+		t.Fatalf("unexpected autoConfig status: %+v", resp.Data.AutoConfig)
+	}
+}

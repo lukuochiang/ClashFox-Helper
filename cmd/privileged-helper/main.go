@@ -185,6 +185,31 @@ type coreStatusData struct {
 	Time    time.Time `json:"time"`
 }
 
+type proxyServerStatus struct {
+	Enabled bool   `json:"enabled"`
+	Server  string `json:"server,omitempty"`
+	Port    int    `json:"port,omitempty"`
+}
+
+type proxyToggleStatus struct {
+	Enabled bool `json:"enabled"`
+}
+
+type autoProxyStatus struct {
+	Enabled bool   `json:"enabled"`
+	URL     string `json:"url,omitempty"`
+}
+
+type proxyStatusData struct {
+	Service       string            `json:"service"`
+	HTTP          proxyServerStatus `json:"http"`
+	HTTPS         proxyServerStatus `json:"https"`
+	SOCKS         proxyServerStatus `json:"socks"`
+	AutoDiscovery proxyToggleStatus `json:"autoDiscovery"`
+	AutoConfig    autoProxyStatus   `json:"autoConfig"`
+	AnyEnabled    bool              `json:"anyEnabled"`
+}
+
 type startupPathStatus struct {
 	Path     string `json:"path"`
 	Exists   bool   `json:"exists"`
@@ -928,6 +953,7 @@ func (h *helper) routes() http.Handler {
 	}))
 	mux.HandleFunc("/v1/proxy/enable", h.withGuards("proxy_enable", h.enableProxy))
 	mux.HandleFunc("/v1/proxy/disable", h.withGuards("proxy_disable", h.disableProxy))
+	mux.HandleFunc("/v1/proxy/status", h.withGuards("proxy_status", h.proxyStatus))
 	mux.HandleFunc("/version", h.withGuards("version", h.versionInfo))
 	mux.HandleFunc("/v1/startup/check", h.withGuards("startup_check", h.startupCheck))
 	mux.HandleFunc("/v1/core/start", h.withGuards("core_start", h.coreStart))
@@ -1271,6 +1297,62 @@ func (h *helper) versionInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Data: map[string]any{"version": h.build}})
+}
+
+func (h *helper) proxyStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+		return
+	}
+
+	ci := h.callerFromReq(r)
+	service, err := h.resolveService(r.URL.Query().Get("service"))
+	if err != nil {
+		h.auditf("proxy_status", ci, false, err.Error())
+		h.writeErr(w, http.StatusBadRequest, "INVALID_SERVICE", err.Error())
+		return
+	}
+
+	var status proxyStatusData
+	status.Service = service
+	opErr := h.withServiceLock(service, func() error {
+		webOn, webHost, webPort, err := h.getProxyConfig(service, false)
+		if err != nil {
+			return err
+		}
+		secOn, secHost, secPort, err := h.getProxyConfig(service, true)
+		if err != nil {
+			return err
+		}
+		socksOn, socksHost, socksPort, err := h.getSOCKSProxyConfig(service)
+		if err != nil {
+			return err
+		}
+		autoDiscoveryOn, err := h.getAutoProxyDiscoveryConfig(service)
+		if err != nil {
+			return err
+		}
+		autoConfigOn, autoConfigURL, err := h.getAutoProxyConfig(service)
+		if err != nil {
+			return err
+		}
+
+		status.HTTP = proxyServerStatus{Enabled: webOn, Server: webHost, Port: webPort}
+		status.HTTPS = proxyServerStatus{Enabled: secOn, Server: secHost, Port: secPort}
+		status.SOCKS = proxyServerStatus{Enabled: socksOn, Server: socksHost, Port: socksPort}
+		status.AutoDiscovery = proxyToggleStatus{Enabled: autoDiscoveryOn}
+		status.AutoConfig = autoProxyStatus{Enabled: autoConfigOn, URL: autoConfigURL}
+		status.AnyEnabled = webOn || secOn || socksOn || autoDiscoveryOn || autoConfigOn
+		return nil
+	})
+	if opErr != nil {
+		h.auditf("proxy_status", ci, false, opErr.Error())
+		h.writeErr(w, http.StatusInternalServerError, "READ_STATUS_FAILED", opErr.Error())
+		return
+	}
+
+	h.auditf("proxy_status", ci, true, "service="+service)
+	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Data: status})
 }
 
 func (h *helper) startupCheck(w http.ResponseWriter, r *http.Request) {

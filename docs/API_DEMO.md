@@ -41,6 +41,14 @@ curl --unix-socket "$SOCK" \
   -d '{}'
 ```
 
+查询代理状态（`service` 可选）：
+
+```bash
+curl --unix-socket "$SOCK" \
+  -H "X-Helper-Token: ${TOKEN}" \
+  -X GET "http://localhost/v1/proxy/status?service=Wi-Fi"
+```
+
 ## 3. mihomo 控制
 
 启动：

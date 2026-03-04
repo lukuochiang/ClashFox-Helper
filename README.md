@@ -34,6 +34,7 @@
 
 - `POST /v1/proxy/enable`: 开启系统 HTTP/HTTPS/SOCKS 代理
 - `POST /v1/proxy/disable`: 关闭系统 HTTP/HTTPS/SOCKS 代理
+- `GET /v1/proxy/status`: 查询系统代理状态（HTTP/HTTPS/SOCKS/AutoDiscovery/PAC）
 - `POST /v1/core/start`: 启动 `mihomo` 内核
 - `POST /v1/core/stop`: 停止 `mihomo` 内核
 - `POST /v1/core/restart`: 重启 `mihomo` 内核
@@ -180,4 +181,12 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
   -H "Content-Type: application/json" \
   -X POST http://localhost/v1/proxy/disable \
   -d '{}'
+```
+
+查询系统代理状态（`service` 可选）：
+
+```bash
+curl --unix-socket /var/run/com.clashfox.helper.sock \
+  -H "X-Helper-Token: ${TOKEN}" \
+  -X GET "http://localhost/v1/proxy/status?service=Wi-Fi"
 ```
