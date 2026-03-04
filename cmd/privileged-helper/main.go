@@ -201,13 +201,16 @@ type autoProxyStatus struct {
 }
 
 type proxyStatusData struct {
-	Service       string            `json:"service"`
-	HTTP          proxyServerStatus `json:"http"`
-	HTTPS         proxyServerStatus `json:"https"`
-	SOCKS         proxyServerStatus `json:"socks"`
-	AutoDiscovery proxyToggleStatus `json:"autoDiscovery"`
-	AutoConfig    autoProxyStatus   `json:"autoConfig"`
-	AnyEnabled    bool              `json:"anyEnabled"`
+	Service         string            `json:"service"`
+	HTTP            proxyServerStatus `json:"http"`
+	HTTPS           proxyServerStatus `json:"https"`
+	SOCKS           proxyServerStatus `json:"socks"`
+	AutoDiscovery   proxyToggleStatus `json:"autoDiscovery"`
+	AutoConfig      autoProxyStatus   `json:"autoConfig"`
+	AnyEnabled      bool              `json:"anyEnabled"`
+	Desired         *proxyDesired     `json:"desired,omitempty"`
+	MatchesDesired  bool              `json:"matchesDesired"`
+	ManagedByHelper bool              `json:"managedByHelper"`
 }
 
 type startupPathStatus struct {
@@ -1343,6 +1346,23 @@ func (h *helper) proxyStatus(w http.ResponseWriter, r *http.Request) {
 		status.AutoDiscovery = proxyToggleStatus{Enabled: autoDiscoveryOn}
 		status.AutoConfig = autoProxyStatus{Enabled: autoConfigOn, URL: autoConfigURL}
 		status.AnyEnabled = webOn || secOn || socksOn || autoDiscoveryOn || autoConfigOn
+
+		h.stateMu.RLock()
+		want, hasDesired := h.state.Proxy[service]
+		h.stateMu.RUnlock()
+		if hasDesired {
+			w := want
+			status.Desired = &w
+			wantWebPort, wantSecPort, wantSocksPort := desiredProxyPorts(want)
+			if want.Enabled {
+				status.MatchesDesired = webOn && secOn && socksOn &&
+					webHost == want.Host && secHost == want.Host && socksHost == want.Host &&
+					webPort == wantWebPort && secPort == wantSecPort && socksPort == wantSocksPort
+			} else {
+				status.MatchesDesired = !webOn && !secOn && !socksOn && !autoDiscoveryOn && !autoConfigOn
+			}
+			status.ManagedByHelper = status.MatchesDesired
+		}
 		return nil
 	})
 	if opErr != nil {
@@ -2430,6 +2450,9 @@ func parseAutoProxyURLOutput(out []byte) (enabled bool, url string, err error) {
 			enabled = b
 			haveEnabled = true
 		case strings.EqualFold(k, "URL"):
+			if strings.EqualFold(v, "(null)") {
+				v = ""
+			}
 			url = v
 		}
 	}

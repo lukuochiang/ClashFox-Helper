@@ -111,6 +111,16 @@ func TestParseAutoProxyURLOutput(t *testing.T) {
 	}
 }
 
+func TestParseAutoProxyURLOutput_NullURL(t *testing.T) {
+	enabled, url, err := parseAutoProxyURLOutput([]byte("URL: (null)\nEnabled: No\n"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if enabled || url != "" {
+		t.Fatalf("unexpected result enabled=%t url=%q", enabled, url)
+	}
+}
+
 func TestParseDefaultRouteInterface(t *testing.T) {
 	out := []byte(`route to: default
 destination: default
@@ -777,9 +787,11 @@ func TestProxyStatusEndpoint(t *testing.T) {
 	var resp struct {
 		OK   bool `json:"ok"`
 		Data struct {
-			Service    string `json:"service"`
-			AnyEnabled bool   `json:"anyEnabled"`
-			HTTP       struct {
+			Service         string `json:"service"`
+			AnyEnabled      bool   `json:"anyEnabled"`
+			MatchesDesired  bool   `json:"matchesDesired"`
+			ManagedByHelper bool   `json:"managedByHelper"`
+			HTTP            struct {
 				Enabled bool   `json:"enabled"`
 				Server  string `json:"server"`
 				Port    int    `json:"port"`
@@ -812,6 +824,12 @@ func TestProxyStatusEndpoint(t *testing.T) {
 	}
 	if !resp.Data.AnyEnabled {
 		t.Fatalf("expected anyEnabled=true")
+	}
+	if resp.Data.MatchesDesired {
+		t.Fatalf("expected matchesDesired=false without desired state")
+	}
+	if resp.Data.ManagedByHelper {
+		t.Fatalf("expected managedByHelper=false without desired state")
 	}
 	if !resp.Data.HTTP.Enabled || resp.Data.HTTP.Server != "127.0.0.1" || resp.Data.HTTP.Port != 6152 {
 		t.Fatalf("unexpected http status: %+v", resp.Data.HTTP)
