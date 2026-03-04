@@ -8,7 +8,10 @@ echo "======================================"
 LABEL="com.clashfox.helper"
 BIN_DST="/Library/PrivilegedHelperTools/${LABEL}"
 PLIST_DST="/Library/LaunchDaemons/${LABEL}.plist"
-BACKUP_DIR="/Library/Application Support/ClashFox/helper/uninstall-backup-$(date +%Y%m%d-%H%M%S)"
+APP_BUNDLE_PATH="${CLASHFOX_APP_PATH:-/Applications/ClashFox.app}"
+APP_HELPER_DIR="${CLASHFOX_HELPER_DIR:-${APP_BUNDLE_PATH}/Contents/Resources/helper}"
+BACKUP_ROOT="${APP_HELPER_DIR}/uninstall-backup"
+BACKUP_DIR="${BACKUP_ROOT}/$(date +%Y%m%d-%H%M%S)"
 VERSION_META="/Library/Application Support/ClashFox/helper/version.json"
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -21,6 +24,8 @@ if launchctl print "system/${LABEL}" >/dev/null 2>&1; then
 fi
 
 mkdir -p "${BACKUP_DIR}"
+chown root:wheel "${BACKUP_ROOT}" "${BACKUP_DIR}" >/dev/null 2>&1 || true
+chmod 755 "${BACKUP_ROOT}" "${BACKUP_DIR}" >/dev/null 2>&1 || true
 
 if [[ -f "${PLIST_DST}" ]]; then
   mv "${PLIST_DST}" "${BACKUP_DIR}/"
