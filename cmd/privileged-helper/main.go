@@ -1124,6 +1124,7 @@ func (h *helper) enableProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Service = service
+	withStatus := wantsStatusSnapshot(r.URL.Query().Get("withStatus"))
 	webPort, secPort, socksPort, err := resolveProxyPorts(req)
 	if !validProxyHost(req.Host) || err != nil {
 		h.auditf("proxy_enable", ci, false, "invalid proxy host/port")
@@ -1133,6 +1134,9 @@ func (h *helper) enableProxy(w http.ResponseWriter, r *http.Request) {
 
 	var opErr error
 	var noop bool
+	var status proxyStatusData
+	var statusReady bool
+	var statusErr error
 	opErr = h.withServiceLock(req.Service, func() error {
 		h.captureProxyBaselineIfNeeded(req.Service)
 		curWebOn, curWebHost, curWebPort, err := h.getProxyConfig(req.Service, false)
@@ -1151,6 +1155,15 @@ func (h *helper) enableProxy(w http.ResponseWriter, r *http.Request) {
 			curWebHost == req.Host && curSecHost == req.Host && curSocksHost == req.Host &&
 			curWebPort == webPort && curSecPort == secPort && curSocksPort == socksPort {
 			noop = true
+			if withStatus {
+				s, err := h.readProxyStatus(req.Service)
+				if err != nil {
+					statusErr = err
+				} else {
+					status = s
+					statusReady = true
+				}
+			}
 			return nil
 		}
 
@@ -1185,6 +1198,15 @@ func (h *helper) enableProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		h.stateMu.Unlock()
 		h.saveState()
+		if withStatus {
+			s, err := h.readProxyStatus(req.Service)
+			if err != nil {
+				statusErr = err
+			} else {
+				status = s
+				statusReady = true
+			}
+		}
 		return nil
 	})
 	if opErr != nil {
@@ -1192,14 +1214,25 @@ func (h *helper) enableProxy(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusInternalServerError, "TXN_APPLY_FAILED", opErr.Error())
 		return
 	}
+	if withStatus && statusErr != nil {
+		h.log.Printf("proxy_enable status snapshot unavailable: service=%s err=%v", req.Service, statusErr)
+	}
 	if noop {
 		h.auditf("proxy_enable", ci, true, "noop")
-		h.writeNoop(w, "proxy already matches target")
+		resp := jsonResp{OK: true, Code: "NOOP", Message: "proxy already matches target"}
+		if withStatus && statusReady {
+			resp.Data = status
+		}
+		h.writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
 	h.auditf("proxy_enable", ci, true, fmt.Sprintf("service=%s host=%s http=%d https=%d socks=%d", req.Service, req.Host, webPort, secPort, socksPort))
-	h.writeJSON(w, http.StatusOK, jsonResp{OK: true})
+	resp := jsonResp{OK: true}
+	if withStatus && statusReady {
+		resp.Data = status
+	}
+	h.writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
@@ -1224,10 +1257,26 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Service = service
+	withStatus := wantsStatusSnapshot(r.URL.Query().Get("withStatus"))
 
 	var opErr error
 	var noop bool
+	var status proxyStatusData
+	var statusReady bool
+	var statusErr error
 	opErr = h.withServiceLock(req.Service, func() error {
+		captureStatus := func() {
+			if !withStatus {
+				return
+			}
+			s, err := h.readProxyStatus(req.Service)
+			if err != nil {
+				statusErr = err
+				return
+			}
+			status = s
+			statusReady = true
+		}
 		current, err := h.readProxySnapshot(req.Service)
 		if err != nil {
 			return err
@@ -1240,6 +1289,7 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 			h.saveState()
 			h.saveBaseline()
 			noop = true
+			captureStatus()
 			return nil
 		}
 		if !hasBaseline && snapshotAllProxyModesDisabled(current) {
@@ -1251,6 +1301,7 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 			h.stateMu.Unlock()
 			h.saveState()
 			noop = true
+			captureStatus()
 			return nil
 		}
 
@@ -1263,6 +1314,7 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 			h.clearProxyBaseline(req.Service)
 			h.saveState()
 			h.saveBaseline()
+			captureStatus()
 			return nil
 		}
 
@@ -1277,6 +1329,7 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 		h.state.Proxy[req.Service] = proxyDesired{Service: req.Service, Enabled: false}
 		h.stateMu.Unlock()
 		h.saveState()
+		captureStatus()
 		return nil
 	})
 	if opErr != nil {
@@ -1284,14 +1337,25 @@ func (h *helper) disableProxy(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusInternalServerError, "TXN_APPLY_FAILED", opErr.Error())
 		return
 	}
+	if withStatus && statusErr != nil {
+		h.log.Printf("proxy_disable status snapshot unavailable: service=%s err=%v", req.Service, statusErr)
+	}
 	if noop {
 		h.auditf("proxy_disable", ci, true, "noop")
-		h.writeNoop(w, "proxy already disabled")
+		resp := jsonResp{OK: true, Code: "NOOP", Message: "proxy already disabled"}
+		if withStatus && statusReady {
+			resp.Data = status
+		}
+		h.writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
 	h.auditf("proxy_disable", ci, true, "service="+req.Service)
-	h.writeJSON(w, http.StatusOK, jsonResp{OK: true})
+	resp := jsonResp{OK: true}
+	if withStatus && statusReady {
+		resp.Data = status
+	}
+	h.writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *helper) versionInfo(w http.ResponseWriter, r *http.Request) {
@@ -1317,52 +1381,12 @@ func (h *helper) proxyStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var status proxyStatusData
-	status.Service = service
 	opErr := h.withServiceLock(service, func() error {
-		webOn, webHost, webPort, err := h.getProxyConfig(service, false)
+		s, err := h.readProxyStatus(service)
 		if err != nil {
 			return err
 		}
-		secOn, secHost, secPort, err := h.getProxyConfig(service, true)
-		if err != nil {
-			return err
-		}
-		socksOn, socksHost, socksPort, err := h.getSOCKSProxyConfig(service)
-		if err != nil {
-			return err
-		}
-		autoDiscoveryOn, err := h.getAutoProxyDiscoveryConfig(service)
-		if err != nil {
-			return err
-		}
-		autoConfigOn, autoConfigURL, err := h.getAutoProxyConfig(service)
-		if err != nil {
-			return err
-		}
-
-		status.HTTP = proxyServerStatus{Enabled: webOn, Server: webHost, Port: webPort}
-		status.HTTPS = proxyServerStatus{Enabled: secOn, Server: secHost, Port: secPort}
-		status.SOCKS = proxyServerStatus{Enabled: socksOn, Server: socksHost, Port: socksPort}
-		status.AutoDiscovery = proxyToggleStatus{Enabled: autoDiscoveryOn}
-		status.AutoConfig = autoProxyStatus{Enabled: autoConfigOn, URL: autoConfigURL}
-		status.AnyEnabled = webOn || secOn || socksOn || autoDiscoveryOn || autoConfigOn
-
-		h.stateMu.RLock()
-		want, hasDesired := h.state.Proxy[service]
-		h.stateMu.RUnlock()
-		if hasDesired {
-			w := want
-			status.Desired = &w
-			wantWebPort, wantSecPort, wantSocksPort := desiredProxyPorts(want)
-			if want.Enabled {
-				status.MatchesDesired = webOn && secOn && socksOn &&
-					webHost == want.Host && secHost == want.Host && socksHost == want.Host &&
-					webPort == wantWebPort && secPort == wantSecPort && socksPort == wantSocksPort
-			} else {
-				status.MatchesDesired = !webOn && !secOn && !socksOn && !autoDiscoveryOn && !autoConfigOn
-			}
-			status.ManagedByHelper = status.MatchesDesired
-		}
+		status = s
 		return nil
 	})
 	if opErr != nil {
@@ -1373,6 +1397,66 @@ func (h *helper) proxyStatus(w http.ResponseWriter, r *http.Request) {
 
 	h.auditf("proxy_status", ci, true, "service="+service)
 	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Data: status})
+}
+
+func wantsStatusSnapshot(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *helper) readProxyStatus(service string) (proxyStatusData, error) {
+	var status proxyStatusData
+	status.Service = service
+
+	webOn, webHost, webPort, err := h.getProxyConfig(service, false)
+	if err != nil {
+		return status, err
+	}
+	secOn, secHost, secPort, err := h.getProxyConfig(service, true)
+	if err != nil {
+		return status, err
+	}
+	socksOn, socksHost, socksPort, err := h.getSOCKSProxyConfig(service)
+	if err != nil {
+		return status, err
+	}
+	autoDiscoveryOn, err := h.getAutoProxyDiscoveryConfig(service)
+	if err != nil {
+		return status, err
+	}
+	autoConfigOn, autoConfigURL, err := h.getAutoProxyConfig(service)
+	if err != nil {
+		return status, err
+	}
+
+	status.HTTP = proxyServerStatus{Enabled: webOn, Server: webHost, Port: webPort}
+	status.HTTPS = proxyServerStatus{Enabled: secOn, Server: secHost, Port: secPort}
+	status.SOCKS = proxyServerStatus{Enabled: socksOn, Server: socksHost, Port: socksPort}
+	status.AutoDiscovery = proxyToggleStatus{Enabled: autoDiscoveryOn}
+	status.AutoConfig = autoProxyStatus{Enabled: autoConfigOn, URL: autoConfigURL}
+	status.AnyEnabled = webOn || secOn || socksOn || autoDiscoveryOn || autoConfigOn
+
+	h.stateMu.RLock()
+	want, hasDesired := h.state.Proxy[service]
+	h.stateMu.RUnlock()
+	if hasDesired {
+		w := want
+		status.Desired = &w
+		wantWebPort, wantSecPort, wantSocksPort := desiredProxyPorts(want)
+		if want.Enabled {
+			status.MatchesDesired = webOn && secOn && socksOn &&
+				webHost == want.Host && secHost == want.Host && socksHost == want.Host &&
+				webPort == wantWebPort && secPort == wantSecPort && socksPort == wantSocksPort
+		} else {
+			status.MatchesDesired = !webOn && !secOn && !socksOn && !autoDiscoveryOn && !autoConfigOn
+		}
+		status.ManagedByHelper = status.MatchesDesired
+	}
+	return status, nil
 }
 
 func (h *helper) startupCheck(w http.ResponseWriter, r *http.Request) {

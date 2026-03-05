@@ -29,6 +29,13 @@ curl --unix-socket "$SOCK" \
   -H "Content-Type: application/json" \
   -X POST "http://localhost/v1/proxy/enable" \
   -d '{"host":"127.0.0.1","port":7890,"socks-port":7891}'
+
+# 可选：带状态快照返回（避免再调用 /v1/proxy/status）
+curl --unix-socket "$SOCK" \
+  -H "X-Helper-Token: ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -X POST "http://localhost/v1/proxy/enable?withStatus=1" \
+  -d '{"host":"127.0.0.1","port":7890,"socks-port":7891}'
 ```
 
 关闭代理：
@@ -38,6 +45,13 @@ curl --unix-socket "$SOCK" \
   -H "X-Helper-Token: ${TOKEN}" \
   -H "Content-Type: application/json" \
   -X POST "http://localhost/v1/proxy/disable" \
+  -d '{}'
+
+# 可选：NOOP/成功都可返回状态快照
+curl --unix-socket "$SOCK" \
+  -H "X-Helper-Token: ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -X POST "http://localhost/v1/proxy/disable?withStatus=1" \
   -d '{}'
 ```
 

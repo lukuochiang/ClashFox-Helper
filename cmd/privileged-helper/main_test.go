@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -750,6 +751,241 @@ func TestDisableProxy_NoBaselineAllDisabledConvergesStateToDisabled(t *testing.T
 	}
 	if got.Enabled {
 		t.Fatalf("expected desired state converged to disabled, got %+v", got)
+	}
+}
+
+func TestEnableProxy_WithStatusSnapshot(t *testing.T) {
+	h := newHandlerTestHelper()
+	h.servicesCache = map[string]struct{}{"Wi-Fi": {}}
+	h.servicesAt = time.Now()
+
+	var webOn, secOn, socksOn bool
+	var webHost, secHost, socksHost string
+	var webPort, secPort, socksPort int
+	proxyOut := func(enabled bool, host string, port int) []byte {
+		enabledText := "No"
+		if enabled {
+			enabledText = "Yes"
+		}
+		return []byte("Enabled: " + enabledText + "\nServer: " + host + "\nPort: " + strconv.Itoa(port) + "\n")
+	}
+	h.commandRunner = func(kind string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "-setwebproxy":
+			webHost = args[2]
+			webPort, _ = strconv.Atoi(args[3])
+			return nil, nil
+		case "-setwebproxystate":
+			webOn = args[2] == "on"
+			return nil, nil
+		case "-setsecurewebproxy":
+			secHost = args[2]
+			secPort, _ = strconv.Atoi(args[3])
+			return nil, nil
+		case "-setsecurewebproxystate":
+			secOn = args[2] == "on"
+			return nil, nil
+		case "-setsocksfirewallproxy":
+			socksHost = args[2]
+			socksPort, _ = strconv.Atoi(args[3])
+			return nil, nil
+		case "-setsocksfirewallproxystate":
+			socksOn = args[2] == "on"
+			return nil, nil
+		case "-getwebproxy":
+			return proxyOut(webOn, webHost, webPort), nil
+		case "-getsecurewebproxy":
+			return proxyOut(secOn, secHost, secPort), nil
+		case "-getsocksfirewallproxy":
+			return proxyOut(socksOn, socksHost, socksPort), nil
+		case "-getproxyautodiscovery":
+			return []byte("Auto Proxy Discovery: Off\n"), nil
+		case "-getautoproxyurl":
+			return []byte("URL: \nEnabled: No\n"), nil
+		default:
+			t.Fatalf("unexpected command: kind=%s args=%v", kind, args)
+			return nil, nil
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/proxy/enable?withStatus=1", strings.NewReader(`{"service":"Wi-Fi","host":"127.0.0.1","port":7890}`))
+	rr := httptest.NewRecorder()
+	h.enableProxy(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		OK   bool            `json:"ok"`
+		Data proxyStatusData `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("expected ok=true")
+	}
+	if resp.Data.Service != "Wi-Fi" {
+		t.Fatalf("unexpected service: %q", resp.Data.Service)
+	}
+	if !resp.Data.AnyEnabled {
+		t.Fatalf("expected anyEnabled=true")
+	}
+	if !resp.Data.HTTP.Enabled || resp.Data.HTTP.Server != "127.0.0.1" || resp.Data.HTTP.Port != 7890 {
+		t.Fatalf("unexpected http status: %+v", resp.Data.HTTP)
+	}
+	if !resp.Data.HTTPS.Enabled || resp.Data.HTTPS.Server != "127.0.0.1" || resp.Data.HTTPS.Port != 7890 {
+		t.Fatalf("unexpected https status: %+v", resp.Data.HTTPS)
+	}
+	if !resp.Data.SOCKS.Enabled || resp.Data.SOCKS.Server != "127.0.0.1" || resp.Data.SOCKS.Port != 7890 {
+		t.Fatalf("unexpected socks status: %+v", resp.Data.SOCKS)
+	}
+}
+
+func TestDisableProxy_WithStatusSnapshotOnNoop(t *testing.T) {
+	h := newHandlerTestHelper()
+	h.servicesCache = map[string]struct{}{"Wi-Fi": {}}
+	h.servicesAt = time.Now()
+	h.commandRunner = func(kind string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "-getwebproxy", "-getsecurewebproxy", "-getsocksfirewallproxy":
+			return []byte("Enabled: No\nServer: \nPort: 0\n"), nil
+		case "-getproxyautodiscovery":
+			return []byte("Auto Proxy Discovery: Off\n"), nil
+		case "-getautoproxyurl":
+			return []byte("URL: \nEnabled: No\n"), nil
+		default:
+			t.Fatalf("unexpected command: kind=%s args=%v", kind, args)
+			return nil, nil
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/proxy/disable?withStatus=1", strings.NewReader(`{"service":"Wi-Fi"}`))
+	rr := httptest.NewRecorder()
+	h.disableProxy(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		OK   bool            `json:"ok"`
+		Code string          `json:"code"`
+		Data proxyStatusData `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !resp.OK || resp.Code != "NOOP" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if resp.Data.Service != "Wi-Fi" {
+		t.Fatalf("unexpected service: %q", resp.Data.Service)
+	}
+	if resp.Data.AnyEnabled {
+		t.Fatalf("expected anyEnabled=false")
+	}
+}
+
+func TestEnableProxy_WithStatusSnapshotFailureStillSucceeds(t *testing.T) {
+	h := newHandlerTestHelper()
+	h.servicesCache = map[string]struct{}{"Wi-Fi": {}}
+	h.servicesAt = time.Now()
+	h.commandRunner = func(kind string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "-getwebproxy", "-getsecurewebproxy", "-getsocksfirewallproxy":
+			return []byte("Enabled: No\nServer: \nPort: 0\n"), nil
+		case "-setwebproxy", "-setwebproxystate", "-setsecurewebproxy", "-setsecurewebproxystate", "-setsocksfirewallproxy", "-setsocksfirewallproxystate":
+			return nil, nil
+		case "-getproxyautodiscovery":
+			return nil, os.ErrPermission
+		default:
+			t.Fatalf("unexpected command: kind=%s args=%v", kind, args)
+			return nil, nil
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/proxy/enable?withStatus=1", strings.NewReader(`{"service":"Wi-Fi","host":"127.0.0.1","port":7890}`))
+	rr := httptest.NewRecorder()
+	h.enableProxy(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		OK   bool             `json:"ok"`
+		Data *proxyStatusData `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("expected ok=true")
+	}
+	if resp.Data != nil {
+		t.Fatalf("expected data omitted when status snapshot fails")
+	}
+	got, ok := h.state.Proxy["Wi-Fi"]
+	if !ok || !got.Enabled || got.Host != "127.0.0.1" {
+		t.Fatalf("expected desired proxy state applied, got=%+v ok=%v", got, ok)
+	}
+}
+
+func TestDisableProxy_WithStatusSnapshotFailureStillSucceeds(t *testing.T) {
+	h := newHandlerTestHelper()
+	h.servicesCache = map[string]struct{}{"Wi-Fi": {}}
+	h.servicesAt = time.Now()
+	h.state.Proxy = map[string]proxyDesired{
+		"Wi-Fi": {
+			Service: "Wi-Fi",
+			Host:    "127.0.0.1",
+			Enabled: true,
+		},
+	}
+
+	var autoDiscoveryGets int
+	h.commandRunner = func(kind string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "-getwebproxy", "-getsecurewebproxy", "-getsocksfirewallproxy":
+			return []byte("Enabled: Yes\nServer: 127.0.0.1\nPort: 7890\n"), nil
+		case "-getproxyautodiscovery":
+			autoDiscoveryGets++
+			if autoDiscoveryGets >= 2 {
+				return nil, os.ErrPermission
+			}
+			return []byte("Auto Proxy Discovery: Off\n"), nil
+		case "-getautoproxyurl":
+			return []byte("URL: \nEnabled: No\n"), nil
+		case "-setwebproxystate", "-setsecurewebproxystate", "-setsocksfirewallproxystate", "-setproxyautodiscovery", "-setautoproxystate":
+			return nil, nil
+		default:
+			t.Fatalf("unexpected command: kind=%s args=%v", kind, args)
+			return nil, nil
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/proxy/disable?withStatus=1", strings.NewReader(`{"service":"Wi-Fi"}`))
+	rr := httptest.NewRecorder()
+	h.disableProxy(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200 got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		OK   bool             `json:"ok"`
+		Data *proxyStatusData `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("expected ok=true")
+	}
+	if resp.Data != nil {
+		t.Fatalf("expected data omitted when status snapshot fails")
+	}
+	got, ok := h.state.Proxy["Wi-Fi"]
+	if !ok || got.Enabled {
+		t.Fatalf("expected desired proxy state converged to disabled, got=%+v ok=%v", got, ok)
 	}
 }
 

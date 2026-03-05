@@ -88,7 +88,7 @@ sudo bash scripts/install-helper.sh ./build/com.clashfox.helper
 sudo bash scripts/uninstall-helper.sh
 ```
 
-说明：卸载脚本会停止服务并把旧二进制/plist 备份到 `uninstall-backup-*` 目录。
+说明：卸载脚本会停止服务并把旧二进制/plist 备份到 `.../uninstall-backup/<timestamp>/` 目录。
 
 ## 调用示例
 
@@ -100,10 +100,18 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
   -H "Content-Type: application/json" \
   -X POST http://localhost/v1/proxy/enable \
   -d '{"service":"Wi-Fi","host":"127.0.0.1","port":7890}'
+
+# 可选：返回一次性状态快照，避免 GUI 再请求 /v1/proxy/status
+curl --unix-socket /var/run/com.clashfox.helper.sock \
+  -H "X-Helper-Token: ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -X POST "http://localhost/v1/proxy/enable?withStatus=1" \
+  -d '{"service":"Wi-Fi","host":"127.0.0.1","port":7890}'
 ```
 
 说明：`service` 字段可省略。未提供时，helper 会自动按默认路由接口解析当前主网络服务（例如 Wi-Fi/Ethernet）。  
 分端口可用：`port/httpPort`（HTTP）、`httpsPort`（HTTPS）、`socksPort`（SOCKS），并兼容 `socks-port`、`mixed-port` 这类连字符字段。若仅提供 `mixed-port`，则三类代理都使用该端口。
+`/v1/proxy/enable` 与 `/v1/proxy/disable` 支持 query 参数 `withStatus=1`，开启后响应会携带 `data`（即代理状态快照）。
 
 查询版本：
 
