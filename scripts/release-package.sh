@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION_FILE="${VERSION_FILE:-./VERSION.txt}"
+VERSION_FILE="${VERSION_FILE:-./artifacts/VERSION.txt}"
 REL_DIR="${REL_DIR:-./release}"
 WORK_DIR="${REL_DIR}/work"
 
+if [[ ! -f "${VERSION_FILE}" && -f ./VERSION.txt ]]; then
+  VERSION_FILE="./VERSION.txt"
+fi
+
 if [[ ! -f "${VERSION_FILE}" ]]; then
-  echo "missing VERSION.txt file: ${VERSION_FILE}"
+  echo "missing version file: ${VERSION_FILE}"
   exit 1
 fi
 
@@ -85,7 +89,7 @@ make_variant() {
   cp scripts/uninstall-helper.sh "${stage_dir}/"
   cp scripts/doctor-helper.sh "${stage_dir}/"
   cp scripts/check-helper.sh "${stage_dir}/"
-  cp VERSION.txt "${stage_dir}/"
+  cp "${VERSION_FILE}" "${stage_dir}/VERSION.txt"
   cp README.md "${stage_dir}/"
   cp LICENSE "${stage_dir}/"
   gen_changelog "${stage_dir}/CHANGELOG.md"

@@ -1,4 +1,4 @@
-.PHONY: test smoke build package release clean
+.PHONY: test smoke build version-artifact package release clean
 
 test:
 	GOCACHE=/tmp/go-build-cache go test ./cmd/privileged-helper
@@ -9,7 +9,11 @@ smoke:
 build:
 	GOCACHE=/tmp/go-build-cache bash scripts/build-helper.sh ./build/com.clashfox.helper
 
-package:
+version-artifact:
+	mkdir -p artifacts
+	cp VERSION.txt artifacts/VERSION.txt
+
+package: version-artifact
 	bash scripts/release-package.sh
 
 release: test smoke package
@@ -17,4 +21,4 @@ release: test smoke package
 	@find release -maxdepth 3 -type f | sort
 
 clean:
-	rm -rf build release
+	rm -rf build release artifacts

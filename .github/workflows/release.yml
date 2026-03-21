@@ -36,22 +36,30 @@ jobs:
       - name: Compatibility Smoke
         run: bash scripts/compat-smoke.sh
 
+      - name: Resolve Version
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          printf '%s\n' "${GITHUB_REF_NAME#v}" > artifacts/VERSION.txt
+          ls -al artifacts
+
       - name: Build Release Package
+        env:
+          VERSION_FILE: artifacts/VERSION.txt
         run: bash scripts/release-package.sh
 
       - name: Verify Release Assets
         run: |
           set -euo pipefail
-          version="$(tr -d '[:space:]' < VERSION.txt)"
+          version="$(tr -d '[:space:]' < artifacts/VERSION.txt)"
           for arch in x86_64 arm64 universal; do
             test -f "release/clashfox-helper-v${version}-darwin-${arch}.tar.gz"
           done
-          test -f VERSION.txt
+          test -f artifacts/VERSION.txt
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            VERSION.txt
             release/*.tar.gz
           generate_release_notes: true
