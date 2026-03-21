@@ -46,6 +46,7 @@ jobs:
       - name: Build Release Package
         env:
           VERSION_FILE: artifacts/VERSION.txt
+          REL_DIR: release-out
         run: bash scripts/release-package.sh
 
       - name: Verify Release Assets
@@ -53,7 +54,7 @@ jobs:
           set -euo pipefail
           version="$(tr -d '[:space:]' < artifacts/VERSION.txt)"
           for arch in x86_64 arm64 universal; do
-            test -f "release/clashfox-helper-v${version}-darwin-${arch}.tar.gz"
+            test -f "release-out/clashfox-helper-v${version}-darwin-${arch}.tar.gz"
           done
           test -f artifacts/VERSION.txt
 
@@ -61,5 +62,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/*.tar.gz
+            release-out/*.tar.gz
           generate_release_notes: true

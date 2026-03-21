@@ -2,7 +2,7 @@
 set -euo pipefail
 
 VERSION_FILE="${VERSION_FILE:-./artifacts/VERSION.txt}"
-REL_DIR="${REL_DIR:-./release}"
+REL_DIR="${REL_DIR:-./release-out}"
 WORK_DIR="${REL_DIR}/work"
 
 if [[ ! -f "${VERSION_FILE}" && -f ./VERSION.txt ]]; then
