@@ -42,7 +42,7 @@ jobs:
       - name: Verify Release Assets
         run: |
           set -euo pipefail
-          version="$(tr -d '[:space:]' < VERSION)"
+          version="$(tr -d '[:space:]' < VERSION.txt)"
           for arch in x86_64 arm64 universal; do
             test -f "release/clashfox-helper-v${version}-darwin-${arch}.tar.gz"
           done

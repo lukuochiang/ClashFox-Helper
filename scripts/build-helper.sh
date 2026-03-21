@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION_FILE="${VERSION_FILE:-./VERSION}"
+VERSION_FILE="${VERSION_FILE:-./VERSION.txt}"
 OUT="${1:-./build/com.clashfox.helper}"
 
 if [[ ! -f "${VERSION_FILE}" ]]; then
-  echo "missing VERSION file: ${VERSION_FILE}"
+  echo "missing VERSION.txt file: ${VERSION_FILE}"
   exit 1
 fi
 
