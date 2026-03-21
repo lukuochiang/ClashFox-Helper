@@ -46,10 +46,12 @@ jobs:
           for arch in x86_64 arm64 universal; do
             test -f "release/clashfox-helper-v${version}-darwin-${arch}.tar.gz"
           done
+          test -f VERSION.txt
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            VERSION.txt
             release/*.tar.gz
           generate_release_notes: true
