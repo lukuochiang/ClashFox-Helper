@@ -48,7 +48,7 @@
 bash scripts/build-helper.sh ./build/com.clashfox.helper
 ```
 
-版本来源：仓库根目录 [VERSION](/Users/workstation/os-code/ClashFox-Helper/VERSION)。
+版本来源：仓库根目录 [VERSION.txt](/Users/workstation/os-code/ClashFox-Helper/VERSION.txt)。
 
 ## 安装为系统服务（需要管理员权限）
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -179,18 +178,11 @@ type jsonResp struct {
 }
 
 type coreStatusData struct {
-	Running         bool       `json:"running"`
-	PID             int        `json:"pid,omitempty"`
-	Binary          string     `json:"binary,omitempty"`
-	Args            []string   `json:"args,omitempty"`
-	StartTime       *time.Time `json:"startTime,omitempty"`
-	StartDurationMs *int64     `json:"startDurationMs,omitempty"`
-	Time            time.Time  `json:"time"`
-}
-
-type coreStartMetrics struct {
-	StartTime       *time.Time `json:"startTime,omitempty"`
-	StartDurationMs *int64     `json:"startDurationMs,omitempty"`
+	Running bool      `json:"running"`
+	PID     int       `json:"pid,omitempty"`
+	Binary  string    `json:"binary,omitempty"`
+	Args    []string  `json:"args,omitempty"`
+	Time    time.Time `json:"time"`
 }
 
 type proxyServerStatus struct {
@@ -236,17 +228,17 @@ type corePIDRecord struct {
 	PID             int      `json:"pid"`
 	Binary          string   `json:"binary"`
 	StartedAt       string   `json:"startedAt"`
-	StartFlowAt     string   `json:"startFlowAt,omitempty"`
-	ReadyAt         string   `json:"readyAt,omitempty"`
-	StartDurationMs int64    `json:"startDurationMs,omitempty"`
+	StartDurationMs *int64   `json:"startDurationMs,omitempty"`
 	Args            []string `json:"args,omitempty"`
 }
 
 type buildInfo struct {
-	Version   string `json:"version"`
-	GitCommit string `json:"gitCommit"`
-	BuildTime string `json:"buildTime"`
-	Launched  string `json:"launchedAt"`
+	Version               string `json:"version"`
+	GitCommit             string `json:"gitCommit"`
+	BuildTime             string `json:"buildTime"`
+	Launched              string `json:"launchedAt"`
+	MihomoStartedAt       string `json:"mihomoStartedAt,omitempty"`
+	MihomoStartDurationMs *int64 `json:"mihomoStartDurationMs,omitempty"`
 }
 
 type rateConfig struct {
@@ -870,7 +862,7 @@ func (h *helper) saveBaseline() {
 }
 
 func (h *helper) saveVersionInfo() {
-	b, _ := json.MarshalIndent(h.build, "", "  ")
+	b, _ := json.MarshalIndent(h.versionSnapshot(), "", "  ")
 	if err := os.MkdirAll(filepath.Dir(versionPath), 0o700); err != nil {
 		h.log.Printf("save version mkdir failed: %v", err)
 		return
@@ -878,6 +870,15 @@ func (h *helper) saveVersionInfo() {
 	if err := os.WriteFile(versionPath, append(b, '\n'), 0o600); err != nil {
 		h.log.Printf("save version failed: %v", err)
 	}
+}
+
+func (h *helper) versionSnapshot() buildInfo {
+	info := h.build
+	if rec, err := readCorePIDRecord(); err == nil && rec.PID > 1 && pidAlive(rec.PID) {
+		info.MihomoStartedAt = rec.StartedAt
+		info.MihomoStartDurationMs = rec.StartDurationMs
+	}
+	return info
 }
 
 func (h *helper) withServiceLock(service string, fn func() error) error {
@@ -1374,7 +1375,7 @@ func (h *helper) versionInfo(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
 		return
 	}
-	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Data: map[string]any{"version": h.build}})
+	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Data: map[string]any{"version": h.versionSnapshot()}})
 }
 
 func (h *helper) proxyStatus(w http.ResponseWriter, r *http.Request) {
@@ -1581,27 +1582,19 @@ func (h *helper) coreStatus(w http.ResponseWriter, r *http.Request) {
 		bin, _ = selectCoreBinary()
 	}
 	args := append([]string(nil), coreArgsTemplate...)
-	var startMetrics coreStartMetrics
 	if running {
-		if rec, err := readCorePIDRecord(); err == nil && rec.PID == pid {
-			if len(rec.Args) > 0 {
-				args = append([]string(nil), rec.Args...)
-			}
-			startMetrics = coreStartMetricsFromRecord(rec)
+		if rec, err := readCorePIDRecord(); err == nil && rec.PID == pid && len(rec.Args) > 0 {
+			args = append([]string(nil), rec.Args...)
 		}
-	} else if rec, err := readCorePIDRecord(); err == nil {
-		startMetrics = coreStartMetricsFromRecord(rec)
 	}
 	h.writeJSON(w, http.StatusOK, jsonResp{
 		OK: true,
 		Data: coreStatusData{
-			Running:         running,
-			PID:             pid,
-			Binary:          bin,
-			Args:            args,
-			StartTime:       startMetrics.StartTime,
-			StartDurationMs: startMetrics.StartDurationMs,
-			Time:            time.Now(),
+			Running: running,
+			PID:     pid,
+			Binary:  bin,
+			Args:    args,
+			Time:    time.Now(),
 		},
 	})
 }
@@ -1632,30 +1625,17 @@ func (h *helper) coreStart(w http.ResponseWriter, r *http.Request) {
 	running, pid, _ := coreRunningFromPIDFile()
 	if running {
 		h.auditf("core_start", ci, true, fmt.Sprintf("noop pid=%d", pid))
-		startMetrics := coreStartMetrics{}
-		if rec, err := readCorePIDRecord(); err == nil {
-			startMetrics = coreStartMetricsFromRecord(rec)
-		}
-		h.writeJSON(w, http.StatusOK, jsonResp{
-			OK:      true,
-			Code:    "NOOP",
-			Message: "core already running",
-			Data:    startMetrics,
-		})
+		h.writeNoop(w, "core already running")
 		return
 	}
-	startedConfigPath, startMetrics, err := h.startCoreLocked(configPathReq)
+	startedConfigPath, err := h.startCoreLocked(configPathReq)
 	if err != nil {
 		h.auditf("core_start", ci, false, err.Error())
 		h.writeErr(w, http.StatusInternalServerError, "CORE_START_FAILED", err.Error())
 		return
 	}
 	h.auditf("core_start", ci, true, "started config="+startedConfigPath)
-	h.writeJSON(w, http.StatusOK, jsonResp{
-		OK:      true,
-		Message: "core started",
-		Data:    startMetrics,
-	})
+	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "core started"})
 }
 
 func (h *helper) coreStop(w http.ResponseWriter, r *http.Request) {
@@ -1729,18 +1709,14 @@ func (h *helper) coreRestart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	startedConfigPath, startMetrics, startErr := h.startCoreWithBinaryLocked(bin, restartConfigPath)
+	startedConfigPath, startErr := h.startCoreWithBinaryLocked(bin, restartConfigPath)
 	if startErr != nil {
 		h.auditf("core_restart", ci, false, "start failed: "+startErr.Error())
 		h.writeErr(w, http.StatusInternalServerError, "CORE_RESTART_FAILED", startErr.Error())
 		return
 	}
 	h.auditf("core_restart", ci, true, "restarted config="+startedConfigPath)
-	h.writeJSON(w, http.StatusOK, jsonResp{
-		OK:      true,
-		Message: "core restarted",
-		Data:    startMetrics,
-	})
+	h.writeJSON(w, http.StatusOK, jsonResp{OK: true, Message: "core restarted"})
 }
 
 func coreConfigPathFromArgs(args []string) string {
@@ -1755,218 +1731,33 @@ func coreConfigPathFromArgs(args []string) string {
 	return ""
 }
 
-func coreStartMetricsFromTimes(start time.Time, ready time.Time) coreStartMetrics {
-	startTime := start
-	var durationMs int64
-	if !ready.IsZero() {
-		durationMs = ready.Sub(start).Milliseconds()
-		if durationMs < 0 {
-			durationMs = 0
-		}
-	}
-	return coreStartMetrics{
-		StartTime:       &startTime,
-		StartDurationMs: &durationMs,
-	}
-}
-
-func coreStartMetricsFromRecord(rec corePIDRecord) coreStartMetrics {
-	var startTime *time.Time
-	if rec.StartFlowAt != "" {
-		if t, ok := parseTimeBestEffort(rec.StartFlowAt); ok {
-			startTime = &t
-		}
-	}
-	if startTime == nil && rec.StartedAt != "" {
-		if t, ok := parseTimeBestEffort(rec.StartedAt); ok {
-			startTime = &t
-		}
-	}
-	var durationMs *int64
-	if rec.StartDurationMs > 0 {
-		d := rec.StartDurationMs
-		durationMs = &d
-	} else if rec.ReadyAt != "" && startTime != nil {
-		if t, ok := parseTimeBestEffort(rec.ReadyAt); ok {
-			d := t.Sub(*startTime).Milliseconds()
-			if d < 0 {
-				d = 0
-			}
-			durationMs = &d
-		}
-	}
-	return coreStartMetrics{
-		StartTime:       startTime,
-		StartDurationMs: durationMs,
-	}
-}
-
-func parseTimeBestEffort(value string) (time.Time, bool) {
-	v := strings.TrimSpace(value)
-	if v == "" {
-		return time.Time{}, false
-	}
-	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-		return t, true
-	}
-	if t, err := time.Parse(time.RFC3339, v); err == nil {
-		return t, true
-	}
-	return time.Time{}, false
-}
-
-func coreControllerAddrFromConfig(configPath string) string {
-	f, err := os.Open(configPath)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if idx := strings.Index(line, "#"); idx >= 0 {
-			line = strings.TrimSpace(line[:idx])
-		}
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		if strings.TrimSpace(parts[0]) != "external-controller" {
-			continue
-		}
-		raw := strings.TrimSpace(parts[1])
-		raw = strings.Trim(raw, "\"'")
-		if raw == "" {
-			continue
-		}
-		if addr, ok := normalizeCoreControllerAddr(raw); ok {
-			return addr
-		}
-	}
-	return ""
-}
-
-func normalizeCoreControllerAddr(raw string) (string, bool) {
-	addr := strings.TrimSpace(raw)
-	if addr == "" {
-		return "", false
-	}
-	if strings.HasPrefix(addr, "http://") {
-		addr = strings.TrimPrefix(addr, "http://")
-	} else if strings.HasPrefix(addr, "https://") {
-		addr = strings.TrimPrefix(addr, "https://")
-	} else if strings.HasPrefix(addr, "unix://") {
-		return "", false
-	}
-	if idx := strings.Index(addr, "/"); idx >= 0 {
-		addr = addr[:idx]
-	}
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return "", false
-	}
-	if strings.HasPrefix(addr, ":") {
-		return "127.0.0.1" + addr, true
-	}
-	if !strings.Contains(addr, ":") {
-		if _, err := strconv.Atoi(addr); err == nil {
-			return "127.0.0.1:" + addr, true
-		}
-		return "", false
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", false
-	}
-	host = strings.TrimSpace(host)
-	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
-		host = "127.0.0.1"
-	}
-	if port == "" {
-		return "", false
-	}
-	return net.JoinHostPort(host, port), true
-}
-
-func coreLogHasOutputSince(start time.Time) bool {
-	fi, err := os.Stat(coreLogPath)
-	if err != nil {
-		return false
-	}
-	if fi.Size() == 0 {
-		return false
-	}
-	return !fi.ModTime().Before(start)
-}
-
-func (h *helper) waitCoreReady(pid int, configPath string, start time.Time) (time.Time, error) {
-	const (
-		coreReadyTimeout      = 8 * time.Second
-		coreReadyPollInterval = 150 * time.Millisecond
-		coreReadyFallbackWait = 500 * time.Millisecond
-	)
-	addr := coreControllerAddrFromConfig(configPath)
-	deadline := time.Now().Add(coreReadyTimeout)
-	for {
-		if !pidAlive(pid) {
-			return time.Time{}, errors.New("core exited before ready")
-		}
-		if addr != "" {
-			conn, err := net.DialTimeout("tcp", addr, 150*time.Millisecond)
-			if err == nil {
-				_ = conn.Close()
-				return time.Now(), nil
-			}
-		} else {
-			if coreLogHasOutputSince(start) || time.Since(start) >= coreReadyFallbackWait {
-				return time.Now(), nil
-			}
-		}
-		if time.Now().After(deadline) {
-			if addr != "" {
-				h.log.Printf("core ready wait timeout: pid=%d addr=%s", pid, addr)
-			}
-			return time.Now(), nil
-		}
-		time.Sleep(coreReadyPollInterval)
-	}
-}
-
-func (h *helper) startCoreLocked(configPathReq string) (string, coreStartMetrics, error) {
+func (h *helper) startCoreLocked(configPathReq string) (string, error) {
 	bin, err := selectCoreBinary()
 	if err != nil {
-		return "", coreStartMetrics{}, err
+		return "", err
 	}
 	return h.startCoreWithBinaryLocked(bin, configPathReq)
 }
 
-func (h *helper) startCoreWithBinaryLocked(bin string, configPathReq string) (string, coreStartMetrics, error) {
-	startFlowAt := time.Now()
+func (h *helper) startCoreWithBinaryLocked(bin string, configPathReq string) (string, error) {
 	if err := validateCoreRuntimePaths(); err != nil {
-		return "", coreStartMetrics{}, err
+		return "", err
 	}
 	if !isAllowedCoreBinary(bin) {
-		return "", coreStartMetrics{}, errors.New("binary path not allowed")
+		return "", errors.New("binary path not allowed")
 	}
 	configPath, err := resolveCoreConfigPath(configPathReq)
 	if err != nil {
-		return "", coreStartMetrics{}, err
+		return "", err
 	}
 	if err := os.MkdirAll(coreDataDir, 0o755); err != nil {
-		return "", coreStartMetrics{}, fmt.Errorf("create core data dir: %w", err)
+		return "", fmt.Errorf("create core data dir: %w", err)
 	}
 	if err := validateCoreStartInputs(bin, configPath); err != nil {
-		return "", coreStartMetrics{}, err
+		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(corePIDPath), 0o700); err != nil {
-		return "", coreStartMetrics{}, err
+		return "", err
 	}
 	coreArgs := []string{
 		"-d", coreDataDir,
@@ -1975,19 +1766,20 @@ func (h *helper) startCoreWithBinaryLocked(bin string, configPathReq string) (st
 
 	lockf, err := os.OpenFile(coreLockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return "", coreStartMetrics{}, err
+		return "", err
 	}
 	if err := syscall.Flock(int(lockf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = lockf.Close()
-		return "", coreStartMetrics{}, errors.New("core lock is held")
+		return "", errors.New("core lock is held")
 	}
 
 	logf, err := os.OpenFile(coreLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		_ = syscall.Flock(int(lockf.Fd()), syscall.LOCK_UN)
 		_ = lockf.Close()
-		return "", coreStartMetrics{}, err
+		return "", err
 	}
+	startedAt := time.Now()
 	cmd := exec.Command(bin, coreArgs...)
 	cmd.Stdout = logf
 	cmd.Stderr = logf
@@ -1995,15 +1787,15 @@ func (h *helper) startCoreWithBinaryLocked(bin string, configPathReq string) (st
 		_ = logf.Close()
 		_ = syscall.Flock(int(lockf.Fd()), syscall.LOCK_UN)
 		_ = lockf.Close()
-		return "", coreStartMetrics{}, err
+		return "", err
 	}
-	spawnedAt := time.Now()
+	startDurationMs := time.Since(startedAt).Milliseconds()
 	rec := corePIDRecord{
-		PID:         cmd.Process.Pid,
-		Binary:      bin,
-		StartedAt:   spawnedAt.Format(time.RFC3339Nano),
-		StartFlowAt: startFlowAt.Format(time.RFC3339Nano),
-		Args:        append([]string(nil), coreArgs...),
+		PID:             cmd.Process.Pid,
+		Binary:          bin,
+		StartedAt:       startedAt.Format(time.RFC3339),
+		StartDurationMs: func() *int64 { v := startDurationMs; return &v }(),
+		Args:            append([]string(nil), coreArgs...),
 	}
 	pidBytes, _ := json.Marshal(rec)
 	if err := writeFileAtomic(corePIDPath, append(pidBytes, '\n'), 0o600); err != nil {
@@ -2011,24 +1803,12 @@ func (h *helper) startCoreWithBinaryLocked(bin string, configPathReq string) (st
 		_ = logf.Close()
 		_ = syscall.Flock(int(lockf.Fd()), syscall.LOCK_UN)
 		_ = lockf.Close()
-		return "", coreStartMetrics{}, err
+		return "", err
 	}
 	h.coreLock = lockf
 	go h.watchCoreExit(cmd, logf, lockf)
-	readyAt, err := h.waitCoreReady(cmd.Process.Pid, configPath, startFlowAt)
-	if err != nil {
-		return "", coreStartMetrics{}, err
-	}
-	if readyAt.IsZero() {
-		readyAt = time.Now()
-	}
-	rec.ReadyAt = readyAt.Format(time.RFC3339Nano)
-	rec.StartDurationMs = readyAt.Sub(startFlowAt).Milliseconds()
-	updatedBytes, _ := json.Marshal(rec)
-	if err := writeFileAtomic(corePIDPath, append(updatedBytes, '\n'), 0o600); err != nil {
-		h.log.Printf("update core start metrics failed: %v", err)
-	}
-	return configPath, coreStartMetricsFromTimes(startFlowAt, readyAt), nil
+	h.saveVersionInfo()
+	return configPath, nil
 }
 
 func resolveCoreConfigPath(configPathReq string) (string, error) {
@@ -2126,6 +1906,7 @@ func (h *helper) stopCoreLocked(pid int) error {
 	}
 	_ = os.Remove(corePIDPath)
 	h.releaseCoreLockLocked()
+	h.saveVersionInfo()
 	return nil
 }
 
@@ -2160,6 +1941,7 @@ func (h *helper) watchCoreExit(cmd *exec.Cmd, logf *os.File, lockf *os.File) {
 		h.releaseCoreLockLocked()
 	}
 	h.coreMu.Unlock()
+	h.saveVersionInfo()
 }
 
 func (h *helper) releaseCoreLockLocked() {

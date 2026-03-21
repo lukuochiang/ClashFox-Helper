@@ -178,10 +178,10 @@ clear_quarantine "${BIN_SRC}" "${PLIST_SRC}"
 
 if [[ -n "${VERSION_IN}" ]]; then
   VERSION="${VERSION_IN}"
-elif [[ -f "${SCRIPT_DIR}/VERSION" ]]; then
-  VERSION="$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION")"
-elif [[ -f "./VERSION" ]]; then
-  VERSION="$(tr -d '[:space:]' < "./VERSION")"
+elif [[ -f "${SCRIPT_DIR}/VERSION.txt" ]]; then
+  VERSION="$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION.txt")"
+elif [[ -f "./VERSION.txt" ]]; then
+  VERSION="$(tr -d '[:space:]' < "./VERSION.txt")"
 else
   VERSION_FROM_BIN="$("${BIN_SRC}" --version 2>/dev/null || true)"
   VERSION="$(printf '%s' "${VERSION_FROM_BIN}" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)"

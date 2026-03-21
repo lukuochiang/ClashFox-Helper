@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION_FILE="${VERSION_FILE:-./VERSION}"
+VERSION_FILE="${VERSION_FILE:-./VERSION.txt}"
 REL_DIR="${REL_DIR:-./release}"
 WORK_DIR="${REL_DIR}/work"
 
 if [[ ! -f "${VERSION_FILE}" ]]; then
-  echo "missing VERSION file: ${VERSION_FILE}"
+  echo "missing VERSION.txt file: ${VERSION_FILE}"
   exit 1
 fi
 
@@ -85,14 +85,14 @@ make_variant() {
   cp scripts/uninstall-helper.sh "${stage_dir}/"
   cp scripts/doctor-helper.sh "${stage_dir}/"
   cp scripts/check-helper.sh "${stage_dir}/"
-  cp VERSION "${stage_dir}/"
+  cp VERSION.txt "${stage_dir}/"
   cp README.md "${stage_dir}/"
   cp LICENSE "${stage_dir}/"
   gen_changelog "${stage_dir}/CHANGELOG.md"
 
   (
     cd "${stage_dir}"
-    shasum -a 256 com.clashfox.helper com.clashfox.helper.plist install-helper.sh uninstall-helper.sh doctor-helper.sh check-helper.sh VERSION README.md LICENSE CHANGELOG.md > checksums.txt
+    shasum -a 256 com.clashfox.helper com.clashfox.helper.plist install-helper.sh uninstall-helper.sh doctor-helper.sh check-helper.sh VERSION.txt README.md LICENSE CHANGELOG.md > checksums.txt
   )
 
   build_meta="{\"version\":\"${VERSION}\",\"gitCommit\":\"${COMMIT}\",\"buildTime\":\"${BUILD_TIME}\",\"launchedAt\":\"\"}"
@@ -119,7 +119,7 @@ JSON
       uninstall-helper.sh \
       doctor-helper.sh \
       check-helper.sh \
-      VERSION \
+      VERSION.txt \
       checksums.txt \
       manifest.json \
       README.md \
