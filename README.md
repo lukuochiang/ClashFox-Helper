@@ -88,7 +88,7 @@ sudo bash scripts/install-helper.sh ./build/com.clashfox.helper
 sudo bash scripts/uninstall-helper.sh
 ```
 
-说明：卸载脚本会停止服务并把旧二进制/plist 备份到 `.../uninstall-backup/<timestamp>/` 目录。
+说明：卸载脚本会停止服务并删除已安装的二进制/plist。
 
 ## 调用示例
 

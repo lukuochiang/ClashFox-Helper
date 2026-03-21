@@ -20,55 +20,8 @@ HISTORY_LOG="${TOKEN_DIR}/version-history.log"
 TOKEN_PATH="${TOKEN_DIR}/token"
 APP_BUNDLE_PATH="${CLASHFOX_APP_PATH:-/Applications/ClashFox.app}"
 APP_HELPER_DIR="${APP_HELPER_DIR_IN:-${CLASHFOX_HELPER_DIR:-${APP_BUNDLE_PATH}/Contents/Resources/helper}}"
-INSTALL_BACKUP_ROOT="${APP_HELPER_DIR}/install-backup"
-INSTALL_BACKUP_BATCH="${INSTALL_BACKUP_ROOT}/$(date +%Y%m%d-%H%M%S)"
 
 SUCCESS=0
-HAD_OLD_BIN=0
-HAD_OLD_PLIST=0
-BIN_BACKUP_READY=0
-PLIST_BACKUP_READY=0
-BIN_BAK=""
-PLIST_BAK=""
-
-rollback() {
-  if [[ "${SUCCESS}" -eq 1 ]]; then
-    return
-  fi
-
-  echo "install failed, rolling back..."
-
-  if [[ "${HAD_OLD_BIN}" -eq 1 ]]; then
-    if [[ "${BIN_BACKUP_READY}" -eq 1 && -n "${BIN_BAK}" && -f "${BIN_BAK}" ]]; then
-      cp -f "${BIN_BAK}" "${BIN_DST}"
-      chown root:wheel "${BIN_DST}"
-      chmod 755 "${BIN_DST}"
-    else
-      echo "skip binary rollback: old binary backup not ready"
-    fi
-  else
-    rm -f "${BIN_DST}"
-  fi
-
-  if [[ "${HAD_OLD_PLIST}" -eq 1 ]]; then
-    if [[ "${PLIST_BACKUP_READY}" -eq 1 && -n "${PLIST_BAK}" && -f "${PLIST_BAK}" ]]; then
-      cp -f "${PLIST_BAK}" "${PLIST_DST}"
-      chown root:wheel "${PLIST_DST}"
-      chmod 644 "${PLIST_DST}"
-    else
-      echo "skip plist rollback: old plist backup not ready"
-    fi
-  else
-    rm -f "${PLIST_DST}"
-  fi
-
-  if [[ -f "${PLIST_DST}" ]]; then
-    launchctl bootstrap system "${PLIST_DST}" || true
-    launchctl enable "system/${LABEL}" || true
-    launchctl kickstart -k "system/${LABEL}" || true
-  fi
-}
-trap rollback EXIT
 
 enforce_launchd_perms() {
   # launchd requires strict ownership/mode for system daemons.
@@ -194,30 +147,6 @@ mkdir -p "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
 prepare_helper_state_dir
 chown root:wheel "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
 chmod 755 "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
-
-if [[ -f "${BIN_DST}" ]]; then
-  HAD_OLD_BIN=1
-fi
-if [[ -f "${PLIST_DST}" ]]; then
-  HAD_OLD_PLIST=1
-fi
-
-if [[ "${HAD_OLD_BIN}" -eq 1 || "${HAD_OLD_PLIST}" -eq 1 ]]; then
-  mkdir -p "${INSTALL_BACKUP_BATCH}"
-  chown root:wheel "${INSTALL_BACKUP_ROOT}" "${INSTALL_BACKUP_BATCH}" >/dev/null 2>&1 || true
-  chmod 755 "${INSTALL_BACKUP_ROOT}" "${INSTALL_BACKUP_BATCH}" >/dev/null 2>&1 || true
-fi
-
-if [[ "${HAD_OLD_BIN}" -eq 1 ]]; then
-  BIN_BAK="${INSTALL_BACKUP_BATCH}/${LABEL}.bin"
-  cp -f "${BIN_DST}" "${BIN_BAK}"
-  BIN_BACKUP_READY=1
-fi
-if [[ "${HAD_OLD_PLIST}" -eq 1 ]]; then
-  PLIST_BAK="${INSTALL_BACKUP_BATCH}/${LABEL}.plist"
-  cp -f "${PLIST_DST}" "${PLIST_BAK}"
-  PLIST_BACKUP_READY=1
-fi
 
 BIN_TMP="${BIN_DST}.new.$$"
 PLIST_TMP="${PLIST_DST}.new.$$"
