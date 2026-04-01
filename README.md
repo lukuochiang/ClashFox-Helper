@@ -68,17 +68,17 @@ sudo bash scripts/install-helper.sh ./build/com.clashfox.helper
 - 版本信息: `/Library/Application Support/ClashFox/helper/version.json`
 - 版本历史: `/Library/Application Support/ClashFox/helper/version-history.log`
 - 旧版本备份: `/Library/Application Support/ClashFox/helper/releases/`
-- mihomo pidfile: `/Library/Application Support/ClashFox/helper/mihomo.pid`
-- mihomo lockfile: `/Library/Application Support/ClashFox/helper/mihomo.lock`
+- mihomo pidfile: `/Library/Application Support/ClashFox/helper/clashfox.pid`
+- mihomo lockfile: `/Library/Application Support/ClashFox/helper/clashfox.lock`
 - mihomo log: `/Users/<name>/Library/Application Support/ClashFox/logs/clashfox.log`
 - mihomo 受控二进制: `/Users/<name>/Library/Application Support/ClashFox/core/mihomo`
-- mihomo 配置文件: `/Users/<name>/Library/Application Support/ClashFox/config/config.yaml`
+- mihomo 配置文件: `/Users/<name>/Library/Application Support/ClashFox/data/default.yaml`
 - 运行日志: `/var/log/clashfox-helper.log`
 - 审计日志: `/var/log/clashfox-helper-audit.log`
 
 说明：helper 会优先按当前登录用户（`/dev/console`）解析 core 路径到：
 - `/Users/<name>/Library/Application Support/ClashFox/core/mihomo`
-- `/Users/<name>/Library/Application Support/ClashFox/config/config.yaml`
+- `/Users/<name>/Library/Application Support/ClashFox/data/default.yaml`
 - `/Users/<name>/Library/Application Support/ClashFox/logs/clashfox.log`
 涉及 mihomo 的安装和更新由 GUI 自己管理，helper 仅负责启停重启与状态查询。
 
@@ -144,8 +144,8 @@ curl --unix-socket /var/run/com.clashfox.helper.sock \
 ```
 
 说明：`/v1/core/start` 支持可选 JSON 参数 `configPath`（兼容别名 `config`），可传相对文件名（例如 `OneSmart.yaml`）或绝对路径。  
-当省略该参数时，默认使用 `/Users/<name>/Library/Application Support/ClashFox/config/config.yaml`。  
-为安全起见，配置路径仅允许位于 `/Users/<name>/Library/Application Support/ClashFox/config/` 目录下。
+当省略该参数时，默认使用 `/Users/<name>/Library/Application Support/ClashFox/data/default.yaml`。  
+为安全起见，配置路径仅允许位于 `/Users/<name>/Library/Application Support/ClashFox/data/` 目录下。
 
 完整调用示例（精简版）：[API_DEMO.md](/Users/workstation/os-code/ClashFox-Helper/docs/API_DEMO.md)
 

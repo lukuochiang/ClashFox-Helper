@@ -350,7 +350,7 @@ func TestDeriveCoreRuntimePaths(t *testing.T) {
 	if bin != "/Users/alice/Library/Application Support/ClashFox/core/mihomo" {
 		t.Fatalf("unexpected binary path: %q", bin)
 	}
-	if conf != "/Users/alice/Library/Application Support/ClashFox/config/config.yaml" {
+	if conf != "/Users/alice/Library/Application Support/ClashFox/data/default.yaml" {
 		t.Fatalf("unexpected config path: %q", conf)
 	}
 	if logPath != "/Users/alice/Library/Application Support/ClashFox/logs/clashfox.log" {
@@ -464,7 +464,7 @@ func TestValidateCoreRuntimePaths(t *testing.T) {
 	coreUserHomeDir = "/Users/alice"
 	coreDataDir = "/Users/alice/Library/Application Support/ClashFox/data"
 	coreManagedBinaryPath = "/Users/alice/Library/Application Support/ClashFox/core/mihomo"
-	coreConfigPath = "/Users/alice/Library/Application Support/ClashFox/config/config.yaml"
+	coreConfigPath = "/Users/alice/Library/Application Support/ClashFox/data/default.yaml"
 	coreLogPath = "/Users/alice/Library/Application Support/ClashFox/logs/clashfox.log"
 	if err := validateCoreRuntimePaths(); err != nil {
 		t.Fatalf("expected valid runtime paths, got %v", err)
@@ -496,7 +496,7 @@ func TestWriteFileAtomic(t *testing.T) {
 func TestValidateCoreStartInputs_RejectsSymlink(t *testing.T) {
 	tmp := t.TempDir()
 	bin := filepath.Join(tmp, "mihomo")
-	cfg := filepath.Join(tmp, "config.yaml")
+	cfg := filepath.Join(tmp, "default.yaml")
 	dataDir := filepath.Join(tmp, "data")
 	logDir := filepath.Join(tmp, "logs")
 	logPath := filepath.Join(logDir, "clashfox.log")
@@ -549,7 +549,7 @@ func TestResolveCoreConfigPath(t *testing.T) {
 	})
 
 	coreUserHomeDir = "/Users/alice"
-	coreConfigPath = "/Users/alice/Library/Application Support/ClashFox/config/config.yaml"
+	coreConfigPath = "/Users/alice/Library/Application Support/ClashFox/data/default.yaml"
 
 	cfg, err := resolveCoreConfigPath("")
 	if err != nil {
@@ -563,16 +563,16 @@ func TestResolveCoreConfigPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("relative config file should be accepted: %v", err)
 	}
-	want := "/Users/alice/Library/Application Support/ClashFox/config/OneSmart.yaml"
+	want := "/Users/alice/Library/Application Support/ClashFox/data/OneSmart.yaml"
 	if cfg != want {
 		t.Fatalf("unexpected resolved config path: got=%q want=%q", cfg, want)
 	}
 
-	cfg, err = resolveCoreConfigPath("/Users/alice/Library/Application Support/ClashFox/config/OnePro.yaml")
+	cfg, err = resolveCoreConfigPath("/Users/alice/Library/Application Support/ClashFox/data/OnePro.yaml")
 	if err != nil {
 		t.Fatalf("absolute config file should be accepted: %v", err)
 	}
-	if cfg != "/Users/alice/Library/Application Support/ClashFox/config/OnePro.yaml" {
+	if cfg != "/Users/alice/Library/Application Support/ClashFox/data/OnePro.yaml" {
 		t.Fatalf("unexpected absolute config path: %q", cfg)
 	}
 

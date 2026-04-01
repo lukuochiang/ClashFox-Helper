@@ -43,8 +43,8 @@ var (
 	policyPath   = filepath.Join(helperStateDir, "policy.json")
 	debugPath    = filepath.Join(helperStateDir, "debug-config.json")
 	versionPath  = filepath.Join(helperStateDir, "version.json")
-	corePIDPath  = filepath.Join(helperStateDir, "mihomo.pid")
-	coreLockPath = filepath.Join(helperStateDir, "mihomo.lock")
+	corePIDPath  = filepath.Join(helperStateDir, "clashfox.pid")
+	coreLockPath = filepath.Join(helperStateDir, "clashfox.lock")
 
 	coreDataDir           = ""
 	coreManagedBinaryPath = ""
@@ -684,7 +684,7 @@ func deriveCoreRuntimePaths(home string) (string, string, string, string, error)
 	base := filepath.Join(home, "Library", "Application Support", "ClashFox")
 	dataDir := filepath.Join(base, "data")
 	binPath := filepath.Join(base, "core", "mihomo")
-	confPath := filepath.Join(base, "config", "config.yaml")
+	confPath := filepath.Join(dataDir, "default.yaml")
 	logPath := filepath.Join(base, "logs", "clashfox.log")
 	return dataDir, binPath, confPath, logPath, nil
 }
@@ -1816,7 +1816,7 @@ func resolveCoreConfigPath(configPathReq string) (string, error) {
 	if req == "" {
 		return coreConfigPath, nil
 	}
-	configBase := filepath.Join(coreUserHomeDir, "Library", "Application Support", "ClashFox", "config")
+	configBase := filepath.Join(coreUserHomeDir, "Library", "Application Support", "ClashFox", "data")
 	cfg := req
 	if filepath.IsAbs(req) {
 		cfg = filepath.Clean(req)
