@@ -14,11 +14,11 @@ version-artifact:
 	cp VERSION.txt artifacts/VERSION.txt
 
 package: version-artifact
-	REL_DIR=./release-out bash scripts/release-package.sh
+	REL_DIR=./release bash scripts/release-package.sh
 
 release: test smoke package
 	@echo "release artifacts:"
-	@find release-out -maxdepth 3 -type f | sort
+	@find release -maxdepth 3 -type f | sort
 
 clean:
-	rm -rf build release-out artifacts
+	rm -rf build release artifacts
