@@ -43,8 +43,8 @@ var (
 	policyPath   = filepath.Join(helperStateDir, "policy.json")
 	debugPath    = filepath.Join(helperStateDir, "debug-config.json")
 	versionPath  = filepath.Join(helperStateDir, "version.json")
-	corePIDPath  = filepath.Join(helperStateDir, "clashfox.pid")
-	coreLockPath = filepath.Join(helperStateDir, "clashfox.lock")
+	corePIDPath  = filepath.Join(helperStateDir, "clashfox-core.pid")
+	coreLockPath = filepath.Join(helperStateDir, "clashfox-core.lock")
 
 	coreDataDir           = ""
 	coreManagedBinaryPath = ""

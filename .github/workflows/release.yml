@@ -52,4 +52,6 @@ jobs:
         with:
           files: |
             release/*.tar.gz
+            artifacts/VERSION.txt
+
           generate_release_notes: true

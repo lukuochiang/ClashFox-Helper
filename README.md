@@ -68,8 +68,8 @@ sudo bash scripts/install-helper.sh ./build/com.clashfox.helper
 - 版本信息: `/Library/Application Support/ClashFox/helper/version.json`
 - 版本历史: `/Library/Application Support/ClashFox/helper/version-history.log`
 - 旧版本备份: `/Library/Application Support/ClashFox/helper/releases/`
-- mihomo pidfile: `/Library/Application Support/ClashFox/helper/clashfox.pid`
-- mihomo lockfile: `/Library/Application Support/ClashFox/helper/clashfox.lock`
+- mihomo pidfile: `/Library/Application Support/ClashFox/helper/clashfox-core.pid`
+- mihomo lockfile: `/Library/Application Support/ClashFox/helper/clashfox-core.lock`
 - mihomo log: `/Users/<name>/Library/Application Support/ClashFox/logs/clashfox.log`
 - mihomo 受控二进制: `/Users/<name>/Library/Application Support/ClashFox/core/mihomo`
 - mihomo 配置文件: `/Users/<name>/Library/Application Support/ClashFox/data/default.yaml`
