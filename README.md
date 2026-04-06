@@ -1,4 +1,8 @@
-# ClashFox Privileged Helper (custom implementation)
+<div align="center">
+  <img src="assets/clashfox-helper.png" alt="ClashFox-Helper Logo" width="200">
+</div>
+
+# ClashFox Privileged Helper
 
 这个仓库提供了一个自定义的 macOS Privileged Helper，用于让桌面应用安全地执行需要 root 权限的网络操作（代理、DNS、TUN 前置能力）。
 
