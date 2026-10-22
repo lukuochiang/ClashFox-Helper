@@ -144,6 +144,27 @@ run_checks() {
   CHECK_HTTP_PING_OK=false
 }
 
+ensure_debug_config() {
+  # Mirror install-helper.sh: the ClashFox client reaches the helper through
+  # /usr/bin/curl, so the documented caller allowlist must trust that path.
+  # Only creates the file when it is missing (never clobbers operator edits).
+  local dbg="${HELPER_PATH}debug-config.json"
+  if [ -e "$dbg" ]; then
+    return 0
+  fi
+  cat > "$dbg" <<'EOF'
+{
+  "extraAllowedCoreBinaries": [],
+  "extraAllowedClientPathPrefixes": [
+    "/usr/bin/curl"
+  ],
+  "enableConsoleCurl": true
+}
+EOF
+  chown root:wheel "$dbg" >/dev/null 2>&1 || true
+  chmod 600 "$dbg" >/dev/null 2>&1 || true
+}
+
 repair_helper() {
   if [ "$(id -u)" -ne 0 ]; then
     REPAIR_ERROR="repair_requires_root"
@@ -192,6 +213,7 @@ repair_helper() {
     return 1
   }
 
+  ensure_debug_config
   launchctl bootstrap system "$INSTALL_PLIST" >/tmp/clashfox-helper-bootstrap.err 2>&1 || launchctl load -w "$INSTALL_PLIST" >/tmp/clashfox-helper-load.err 2>&1 || {
     REPAIR_ERROR="launchctl_load_failed"
     return 1
@@ -203,13 +225,18 @@ repair_helper() {
   chmod 755 "$HELPER_PATH" >/dev/null 2>&1 || true
   local console_uid
   console_uid="$(stat -f '%u' /dev/console 2>/dev/null || true)"
+  # macOS `chmod +a` needs an account NAME, not a numeric UID; resolving the name
+  # avoids the silent "Unable to translate '<uid>' to a UUID" failure that left the
+  # token unreadable by the GUI process.
+  local console_user
+  console_user="$(id -un "${console_uid}" 2>/dev/null || true)"
   local attempt=0
   while [ "$attempt" -lt 25 ]; do
     if [ -f "$TOKEN_PATH" ]; then
       chmod 600 "$TOKEN_PATH" >/dev/null 2>&1 || true
       chmod -N "$TOKEN_PATH" >/dev/null 2>&1 || true
-      if [ -n "$console_uid" ] && [ "$console_uid" != "0" ]; then
-        chmod +a "user:${console_uid} allow read" "$TOKEN_PATH" >/dev/null 2>&1 || true
+      if [ -n "$console_user" ] && [ "$console_uid" != "0" ]; then
+        chmod +a "user:${console_user} allow read" "$TOKEN_PATH" >/dev/null 2>&1 || true
       fi
       break
     fi

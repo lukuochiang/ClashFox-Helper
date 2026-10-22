@@ -98,13 +98,18 @@ ensure_token_readable() {
   chmod 755 "${TOKEN_DIR}" >/dev/null 2>&1 || true
   local console_uid
   console_uid="$(stat -f '%u' /dev/console 2>/dev/null || true)"
+  # macOS `chmod +a` requires an account NAME, not a numeric UID; a raw uid fails
+  # with "Unable to translate '<uid>' to a UUID" (silently swallowed by `|| true`),
+  # which left the token without a read ACL and made the app report helper_unreachable.
+  local console_user
+  console_user="$(id -un "${console_uid}" 2>/dev/null || true)"
   local attempt=0
   while [[ "${attempt}" -lt 25 ]]; do
     if [[ -f "${TOKEN_PATH}" ]]; then
       chmod 600 "${TOKEN_PATH}" >/dev/null 2>&1 || true
       chmod -N "${TOKEN_PATH}" >/dev/null 2>&1 || true
-      if [[ -n "${console_uid}" && "${console_uid}" != "0" ]]; then
-        chmod +a "user:${console_uid} allow read" "${TOKEN_PATH}" >/dev/null 2>&1 || true
+      if [[ -n "${console_user}" && "${console_uid}" != "0" ]]; then
+        chmod +a "user:${console_user} allow read" "${TOKEN_PATH}" >/dev/null 2>&1 || true
       fi
       return 0
     fi
@@ -112,6 +117,29 @@ ensure_token_readable() {
     sleep 0.2
   done
   return 0
+}
+
+ensure_debug_config() {
+  # The ClashFox client reaches the helper through `/usr/bin/curl` over the unix
+  # socket, so the caller path the helper authenticates is `/usr/bin/curl`. The
+  # hardened default policy no longer trusts that path (see README + docs/debug-config.json),
+  # so we lay down the documented runtime config on a fresh install. An existing
+  # (operator-edited) file is left untouched to avoid clobbering deliberate changes.
+  local dbg="${TOKEN_DIR}/debug-config.json"
+  if [[ -e "${dbg}" ]]; then
+    return 0
+  fi
+  cat > "${dbg}" <<'EOF'
+{
+  "extraAllowedCoreBinaries": [],
+  "extraAllowedClientPathPrefixes": [
+    "/usr/bin/curl"
+  ],
+  "enableConsoleCurl": true
+}
+EOF
+  chown root:wheel "${dbg}" >/dev/null 2>&1 || true
+  chmod 600 "${dbg}" >/dev/null 2>&1 || true
 }
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -145,6 +173,7 @@ fi
 
 mkdir -p "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
 prepare_helper_state_dir
+ensure_debug_config
 chown root:wheel "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
 chmod 755 "/Library/PrivilegedHelperTools" "/Library/LaunchDaemons"
 
